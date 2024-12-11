@@ -32,6 +32,7 @@
 #define __builtin_popcount __popcnt
 #define __builtin_popcountll __popcnt64
 
+#ifdef aeron_EXPORTS
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 {
     switch (fdwReason)
@@ -57,6 +58,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 
     return TRUE;
 }
+#endif
 
 typedef struct { UINT64 q[2]; } aeron_uint128_t;
 
