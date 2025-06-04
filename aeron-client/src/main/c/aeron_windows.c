@@ -32,6 +32,7 @@
 #define __builtin_popcount __popcnt
 #define __builtin_popcountll __popcnt64
 
+#ifdef aeron_EXPORTS
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 {
     switch (fdwReason)
@@ -57,6 +58,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 
     return TRUE;
 }
+#endif
 
 typedef struct { UINT64 q[2]; } aeron_uint128_t;
 
@@ -196,6 +198,23 @@ double aeron_erand48(unsigned short xsubi[3])
 void localtime_r(const time_t *timep, struct tm *result)
 {
     localtime_s(result, timep);
+}
+
+char *aeron_strndup(const char *value, size_t length)
+{
+    size_t str_length = strlen(value);
+    char *dup = NULL;
+
+    str_length = (str_length > length) ? length : str_length;
+    if (aeron_alloc((void **)&dup, str_length + 1) < 0)
+    {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    strncpy(dup, value, str_length);
+    dup[str_length] = '\0';
+    return dup;
 }
 
 #else
