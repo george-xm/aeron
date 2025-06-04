@@ -124,7 +124,7 @@ int64_t aeron_nano_clock(void)
 int64_t aeron_epoch_clock(void)
 {
     struct timespec ts;
-    if (aeron_clock_gettime_realtime_coarse(&ts) < 0)
+    if (aeron_clock_gettime_monotonic(&ts) < 0)
     {
         return -1;
     }
