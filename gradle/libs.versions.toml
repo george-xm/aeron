@@ -8,11 +8,11 @@ checkstyle = "10.21.2"
 commons-codec = "1.15"
 commons-lang3 = "3.8.1"
 findbugs = "3.0.1"
-gradle = "8.12.1"
 hamcrest = "3.0"
 hdrHistogram = "2.2.2"
 httpcore = "4.4.14"
-jgit = "6.10.0.202406032230-r"
+jgit = "7.2.1.202505142326-r"
+json = "20250517"
 junit = "5.11.4"
 mockito = "5.15.2"
 plexus = "3.3.0"
@@ -37,6 +37,7 @@ hamcrest = { group = "org.hamcrest", name = "hamcrest", version.ref = "hamcrest"
 hdrHistogram = { group = "org.hdrhistogram", name = "HdrHistogram", version.ref = "hdrHistogram" }
 httpcore = { group = "org.apache.httpcomponents", name = "httpcore", version.ref = "httpcore" }
 jgit = { group = "org.eclipse.jgit", name = "org.eclipse.jgit", version.ref = "jgit" }
+json = { group = "org.json", name = "json", version.ref = "json" }
 junit-bom = { group = "org.junit", name = "junit-bom", version.ref = "junit" }
 mockito = { group = "org.mockito", name = "mockito-core", version.ref = "mockito" }
 plexus-utils = { group = "org.codehaus.plexus", name = "plexus-utils", version.ref = "plexus" }
