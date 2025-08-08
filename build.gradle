@@ -1432,6 +1432,5 @@ tasks.register('uploadArtifactsToCentralPortal', io.aeron.build.SonatypeCentralP
 }
 
 wrapper {
-    gradleVersion = libs.versions.gradle.get()
     distributionType = 'ALL'
 }
