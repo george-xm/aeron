@@ -2982,10 +2982,8 @@ class ClusterTest
 
         Tests.awaitValue(leader.consensusModule().context().errorCounter(), 1);
         Tests.await(() -> ConsensusModule.State.ACTIVE == leader.moduleState());
+        Tests.awaitValue(cluster.getClusterControlToggle(leader), ClusterControl.ToggleState.NEUTRAL.code());
         assertEquals(0, leader.consensusModule().context().snapshotCounter().get());
-        assertEquals(
-            ClusterControl.ToggleState.NEUTRAL,
-            ClusterControl.ToggleState.get(cluster.getClusterControlToggle(leader)));
 
         for (final TestNode follower : cluster.followers())
         {
