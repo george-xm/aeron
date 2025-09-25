@@ -27,6 +27,7 @@ import org.agrona.MutableDirectBuffer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
 class ControlSessionAdapterV6Test
@@ -207,7 +208,7 @@ class ControlSessionAdapterV6Test
         final int connectRequestLength = connectRequestEncoder.encodedLength();
 
         doReturn(mockSession).when(mockConductor).newControlSession(
-            anyLong(), anyLong(), anyInt(), anyInt(), any(), any(), any());
+            any(), anyLong(), anyInt(), anyInt(), anyString(), any(), anyString(), any());
         doReturn(CONTROL_SESSION_ID).when(mockSession).sessionId();
         doReturn(true).when(mockAuthorisationService).isAuthorised(anyInt(), anyInt(), any(), any());
 

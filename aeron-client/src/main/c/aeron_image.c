@@ -122,11 +122,11 @@ int aeron_image_delete(aeron_image_t *image)
     return 0;
 }
 
-void aeron_image_force_close(aeron_image_t *image)
+void aeron_image_close(aeron_image_t *image)
 {
     AERON_GET_ACQUIRE(image->eos_position, image->metadata->end_of_stream_position);
-    AERON_SET_RELEASE(image->final_position, *image->subscriber_position);
-    AERON_SET_RELEASE(image->is_eos, (image->final_position >= image->eos_position));
+    image->final_position = aeron_counter_get_acquire(image->subscriber_position);
+    image->is_eos = image->final_position >= image->eos_position;
     AERON_SET_RELEASE(image->is_closed, true);
 }
 
@@ -255,6 +255,21 @@ int aeron_image_active_transport_count(aeron_image_t *image)
     return (int)active_transport_count;
 }
 
+bool aeron_image_is_publication_revoked(aeron_image_t *image)
+{
+    if (NULL == image)
+    {
+        AERON_SET_ERR(EINVAL, "Parameters must not be null, image: %s", AERON_NULL_STR(image));
+        return -1;
+    }
+
+    bool is_publication_revoked;
+
+    AERON_GET_ACQUIRE(is_publication_revoked, image->metadata->is_publication_revoked);
+
+    return is_publication_revoked;
+}
+
 int aeron_image_poll(aeron_image_t *image, aeron_fragment_handler_t handler, void *clientd, size_t fragment_limit)
 {
     if (NULL == image || NULL == handler)
@@ -326,7 +341,7 @@ int aeron_image_poll(aeron_image_t *image, aeron_fragment_handler_t handler, voi
     int64_t new_position = initial_position + (offset - initial_offset);
     if (new_position > initial_position)
     {
-        aeron_counter_set_ordered(image->subscriber_position, new_position);
+        aeron_counter_set_release(image->subscriber_position, new_position);
     }
 
     return (int)fragments_read;
@@ -419,14 +434,14 @@ int aeron_image_controlled_poll(
         {
             initial_position += (offset - initial_offset);
             initial_offset = offset;
-            aeron_counter_set_ordered(image->subscriber_position, initial_position);
+            aeron_counter_set_release(image->subscriber_position, initial_position);
         }
     }
 
     int64_t new_position = initial_position + (offset - initial_offset);
     if (new_position > initial_position)
     {
-        aeron_counter_set_ordered(image->subscriber_position, new_position);
+        aeron_counter_set_release(image->subscriber_position, new_position);
     }
 
     return (int)fragments_read;
@@ -515,7 +530,7 @@ int aeron_image_bounded_poll(
     int64_t new_position = initial_position + (offset - initial_offset);
     if (new_position > initial_position)
     {
-        aeron_counter_set_ordered(image->subscriber_position, new_position);
+        aeron_counter_set_release(image->subscriber_position, new_position);
     }
 
     return (int)fragments_read;
@@ -619,14 +634,14 @@ int aeron_image_bounded_controlled_poll(
         {
             initial_position += (offset - initial_offset);
             initial_offset = offset;
-            aeron_counter_set_ordered(image->subscriber_position, initial_position);
+            aeron_counter_set_release(image->subscriber_position, initial_position);
         }
     }
 
     int64_t new_position = initial_position + (offset - initial_offset);
     if (new_position > initial_position)
     {
-        aeron_counter_set_ordered(image->subscriber_position, new_position);
+        aeron_counter_set_release(image->subscriber_position, new_position);
     }
 
     return (int)fragments_read;
@@ -818,7 +833,7 @@ int aeron_image_block_poll(
             term_id);
     }
 
-    aeron_counter_set_ordered(image->subscriber_position, position + length);
+    aeron_counter_set_release(image->subscriber_position, position + length);
 
     return (int)length;
 }
@@ -835,6 +850,15 @@ bool aeron_image_is_closed(aeron_image_t *image)
     return is_closed;
 }
 
+int aeron_image_reject(aeron_image_t *image, const char *reason)
+{
+    return aeron_subscription_reject_image(
+        image->subscription,
+        image->key.correlation_id,
+        aeron_image_position(image),
+        reason);
+}
+
 extern int64_t aeron_image_removal_change_number(aeron_image_t *image);
 
 extern bool aeron_image_is_in_use_by_subscription(aeron_image_t *image, int64_t last_change_number);
@@ -845,4 +869,4 @@ extern int64_t aeron_image_incr_refcnt(aeron_image_t *image);
 
 extern int64_t aeron_image_decr_refcnt(aeron_image_t *image);
 
-extern int64_t aeron_image_refcnt_volatile(aeron_image_t *image);
+extern int64_t aeron_image_refcnt_acquire(aeron_image_t *image);

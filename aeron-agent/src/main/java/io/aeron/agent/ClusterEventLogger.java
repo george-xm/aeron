@@ -590,41 +590,6 @@ public final class ClusterEventLogger
     }
 
     /**
-     * Log addition of a passive member to the cluster.
-     *
-     * @param memberId        of the current cluster node.
-     * @param correlationId   correlationId for responding to the addition of the passive member.
-     * @param memberEndpoints the endpoints for the new member.
-     */
-    public void logOnAddPassiveMember(final int memberId, final long correlationId, final String memberEndpoints)
-    {
-        final int length = addPassiveMemberLength(memberEndpoints);
-        final int captureLength = captureLength(length);
-        final int encodedLength = encodedLength(captureLength);
-        final ManyToOneRingBuffer ringBuffer = this.ringBuffer;
-        final int index = ringBuffer.tryClaim(ADD_PASSIVE_MEMBER.toEventCodeId(), encodedLength);
-
-        if (index > 0)
-        {
-            try
-            {
-                ClusterEventEncoder.encodeOnAddPassiveMember(
-                    (UnsafeBuffer)ringBuffer.buffer(),
-                    index,
-                    length,
-                    length,
-                    memberId,
-                    correlationId,
-                    memberEndpoints);
-            }
-            finally
-            {
-                ringBuffer.commit(index);
-            }
-        }
-    }
-
-    /**
      * Log the appending of a session close event to the log.
      *
      * @param memberId         member (leader) publishing the event.

@@ -20,7 +20,9 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <iterator>
+#include <stdexcept>
 
 #include "Image.h"
 #include "concurrent/CountersReader.h"
@@ -30,12 +32,14 @@
 extern "C"
 {
 #include "aeron_common.h"
+#include "uri/aeron_uri.h"
 }
 
 namespace aeron
 {
 
 using namespace aeron::concurrent::logbuffer;
+using AsyncDestination = aeron_async_destination_t;
 
 class AsyncAddSubscription
 {
@@ -236,7 +240,7 @@ public:
      */
     std::string tryResolveChannelEndpointPort() const
     {
-        char uri_buffer[AERON_CLIENT_MAX_LOCAL_ADDRESS_STR_LEN] = { 0 };
+        char uri_buffer[AERON_URI_MAX_LENGTH] = { 0 };
 
         if (aeron_subscription_try_resolve_channel_endpoint_port(m_subscription, uri_buffer, sizeof(uri_buffer)) < 0)
         {
@@ -492,7 +496,7 @@ public:
             return nullptr;
         }
 
-        return std::make_shared<Image>(m_subscription, image);
+        return createImage(image);
     }
 
     /**
@@ -512,7 +516,7 @@ public:
             throw std::logic_error("index out of range");
         }
 
-        return std::make_shared<Image>(m_subscription, image);
+        return createImage(image);
     }
 
     /**
@@ -569,26 +573,6 @@ public:
     {
         return m_subscription;
     }
-
-    /// @cond HIDDEN_SYMBOLS
-    bool hasImage(std::int64_t correlationId) const
-    {
-        bool hasImage = false;
-        auto imageList = copyOfImageList();
-
-        for (auto &image : *imageList)
-        {
-            if (image->correlationId() == correlationId)
-            {
-                hasImage = true;
-                break;
-            }
-        }
-
-        return hasImage;
-    }
-    /// @endcond
-
 private:
     aeron_t *m_aeron = nullptr;
     aeron_subscription_t *m_subscription = nullptr;
@@ -603,6 +587,21 @@ private:
         auto subscriptionAndImages =
             static_cast<std::pair<aeron_subscription_t *, std::vector<std::shared_ptr<Image>> *> *>(clientd);
         subscriptionAndImages->second->push_back(std::make_shared<Image>(subscriptionAndImages->first, image));
+    }
+
+    inline std::shared_ptr<Image> createImage(aeron_image_t *image) const
+    {
+        std::shared_ptr<Image> result;
+        try {
+            result = std::make_shared<Image>(m_subscription, image);
+        }
+        catch (const std::exception& e)
+        {
+            aeron_subscription_image_release(m_subscription, image);
+            throw e;
+        }
+        aeron_subscription_image_release(m_subscription, image);
+        return result;
     }
 };
 

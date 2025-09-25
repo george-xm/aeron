@@ -20,6 +20,7 @@ import io.aeron.driver.MediaDriver;
 import io.aeron.driver.status.SystemCounterDescriptor;
 import org.agrona.CloseHelper;
 import org.agrona.ErrorHandler;
+import org.agrona.concurrent.ShutdownSignalBarrier;
 import org.agrona.concurrent.status.AtomicCounter;
 
 import static org.agrona.SystemUtil.loadPropertiesFiles;
@@ -46,13 +47,18 @@ public class ClusterBackupMediaDriver implements AutoCloseable
      *
      * @param args command line argument which is a list for properties files as URLs or filenames.
      */
+    @SuppressWarnings("try")
     public static void main(final String[] args)
     {
         loadPropertiesFiles(args);
 
-        try (ClusterBackupMediaDriver driver = launch())
+        try (ShutdownSignalBarrier barrier = new ShutdownSignalBarrier();
+            ClusterBackupMediaDriver ignore = launch(
+                new MediaDriver.Context().terminationHook(barrier::signalAll),
+                new Archive.Context(),
+                new ClusterBackup.Context().terminationHook(barrier::signalAll)))
         {
-            driver.clusterBackup().context().shutdownSignalBarrier().await();
+            barrier.await();
             System.out.println("Shutdown ClusterBackupMediaDriver...");
         }
     }

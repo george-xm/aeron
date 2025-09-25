@@ -512,7 +512,7 @@ static int aeron_driver_name_resolver_add_neighbor(
         memcpy(&new_neighbor->cache_addr, cache_addr, sizeof(new_neighbor->cache_addr));
         new_neighbor->time_of_last_activity_ms = time_of_last_activity_ms;
         resolver->neighbors.length++;
-        aeron_counter_set_ordered(resolver->neighbor_counter.value_addr, (int64_t)resolver->neighbors.length);
+        aeron_counter_set_release(resolver->neighbor_counter.value_addr, (int64_t) resolver->neighbors.length);
 
         return 1;
     }
@@ -575,7 +575,7 @@ static bool aeron_driver_name_resolver_is_wildcard(int8_t res_type, uint8_t *add
 static void aeron_name_resolver_log_and_clear_error(aeron_driver_name_resolver_t *resolver)
 {
     aeron_distinct_error_log_record(resolver->error_log, aeron_errcode(), aeron_errmsg());
-    aeron_counter_increment(resolver->error_counter, 1);
+    aeron_counter_increment(resolver->error_counter);
     aeron_err_clear();
 }
 
@@ -596,7 +596,7 @@ void aeron_driver_name_resolver_receive(
 
     if ((remaining < sizeof(aeron_frame_header_t)) || (frame_header->version != AERON_FRAME_HEADER_VERSION))
     {
-        aeron_counter_increment(resolver->invalid_packets_counter, 1);
+        aeron_counter_increment(resolver->invalid_packets_counter);
         return;
     }
 
@@ -607,7 +607,7 @@ void aeron_driver_name_resolver_receive(
         const size_t offset = length - remaining;
         if (AERON_HDR_TYPE_RES != frame_header->type || remaining < sizeof(aeron_resolution_header_t))
         {
-            aeron_counter_increment(resolver->invalid_packets_counter, 1);
+            aeron_counter_increment(resolver->invalid_packets_counter);
             return;
         }
 
@@ -626,7 +626,7 @@ void aeron_driver_name_resolver_receive(
             if (length < sizeof(aeron_resolution_header_ipv4_t) ||
                 length < (entry_length = aeron_res_header_entry_length_ipv4(ip4_hdr)))
             {
-                aeron_counter_increment(resolver->invalid_packets_counter, 1);
+                aeron_counter_increment(resolver->invalid_packets_counter);
                 return;
             }
 
@@ -640,7 +640,7 @@ void aeron_driver_name_resolver_receive(
             if (length < sizeof(aeron_resolution_header_ipv6_t) ||
                 length < (entry_length = aeron_res_header_entry_length_ipv6(ip6_hdr)))
             {
-                aeron_counter_increment(resolver->invalid_packets_counter, 1);
+                aeron_counter_increment(resolver->invalid_packets_counter);
                 return;
             }
 
@@ -762,7 +762,7 @@ static int aeron_driver_name_resolver_do_send(
     {
         if (bytes_sent < (int64_t)iov.iov_len)
         {
-            aeron_counter_increment(resolver->short_sends_counter, 1);
+            aeron_counter_increment(resolver->short_sends_counter);
         }
     }
     else
@@ -979,7 +979,7 @@ static int aeron_driver_name_resolver_timeout_neighbors(aeron_driver_name_resolv
 
     if (0 != num_removed)
     {
-        aeron_counter_set_ordered(resolver->neighbor_counter.value_addr, (int64_t)resolver->neighbors.length);
+        aeron_counter_set_release(resolver->neighbor_counter.value_addr, (int64_t) resolver->neighbors.length);
     }
 
     return num_removed;

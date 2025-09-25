@@ -45,7 +45,6 @@ import java.util.Random;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 
 @ExtendWith({ EventLogExtension.class, InterruptingTestCallback.class })
 public class BytesSentAndReceivedTest
@@ -125,13 +124,10 @@ public class BytesSentAndReceivedTest
         }
 
         final CountersReader countersReader = aeron.countersReader();
-        assertThat(
-            SystemCounterDescriptor.BYTES_SENT.label(),
-            countersReader.getCounterValue(SystemCounterDescriptor.BYTES_SENT.id()),
-            greaterThanOrEqualTo(expectedTotalBytes));
-        assertThat(
-            SystemCounterDescriptor.BYTES_RECEIVED.label(),
-            countersReader.getCounterValue(SystemCounterDescriptor.BYTES_RECEIVED.id()),
-            greaterThanOrEqualTo(expectedTotalBytes));
+        while (countersReader.getCounterValue(SystemCounterDescriptor.BYTES_SENT.id()) < expectedTotalBytes ||
+            countersReader.getCounterValue(SystemCounterDescriptor.BYTES_RECEIVED.id()) < expectedTotalBytes)
+        {
+            Tests.yield();
+        }
     }
 }

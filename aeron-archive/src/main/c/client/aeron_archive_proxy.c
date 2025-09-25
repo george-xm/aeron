@@ -14,13 +14,15 @@
  * limitations under the License.
  */
 
+#include <stdio.h>
+
+#include "aeron_alloc.h"
 #include "aeron_archive.h"
+#include "aeron_archive_client_version.h"
 #include "aeron_archive_context.h"
 #include "aeron_archive_proxy.h"
 #include "aeron_archive_configuration.h"
 #include "aeron_archive_replay_params.h"
-
-#include "aeron_alloc.h"
 #include "util/aeron_error.h"
 
 #include "c/aeron_archive_client/authConnectRequest.h"
@@ -91,6 +93,20 @@ int aeron_archive_proxy_init(
     aeron_exclusive_publication_t *exclusive_publication,
     int retry_attempts)
 {
+    int total_length = snprintf(
+        archive_proxy->client_info,
+        sizeof(archive_proxy->client_info),
+        "name=%s version=%s commit=%s",
+        ctx->client_name,
+        aeron_archive_client_version_text(),
+        aeron_archive_client_version_git_sha());
+    if (total_length < 0)
+    {
+        AERON_SET_ERR(errno, "%s", "Failed to format client_info");
+        return -1;
+    }
+    archive_proxy->client_info[total_length] = '\0';
+
     archive_proxy->ctx = ctx;
     archive_proxy->exclusive_publication = exclusive_publication;
     archive_proxy->control_session_id = AERON_NULL_VALUE;
@@ -152,6 +168,10 @@ bool aeron_archive_proxy_try_connect(
         &codec,
         NULL == encoded_credentials ? "" : encoded_credentials->data,
         NULL == encoded_credentials ? 0 : encoded_credentials->length);
+    aeron_archive_client_authConnectRequest_put_clientInfo(
+        &codec,
+        archive_proxy->client_info,
+        strlen(archive_proxy->client_info));
 
     return aeron_archive_proxy_offer_once(
         archive_proxy,

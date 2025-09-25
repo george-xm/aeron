@@ -150,6 +150,31 @@ public final class ExclusivePublication extends ExclusivePublicationValues
     }
 
     /**
+     * Mark the publication to be revoked when {@link #close()} is called.  See  {@link #revoke()}
+     */
+    public void revokeOnClose()
+    {
+        revokeOnClose = true;
+    }
+
+    /**
+     * Immediately revoke and {@link #close()} the publication.
+     *
+     * Revoking disposes of resources as soon as possible. On the publication side the log buffer won't linger,
+     * while on the subscription side the image will go unavailable without requiring all data to be drained.
+     * Hence, it should be used only when it's known that all subscribers have received all the data,
+     * or if it doesn't matter if they have.
+     */
+    public void revoke()
+    {
+        if (!isClosed)
+        {
+            revokeOnClose = true;
+            close();
+        }
+    }
+
+    /**
      * {@inheritDoc}
      */
     public long position()
@@ -606,7 +631,7 @@ public final class ExclusivePublication extends ExclusivePublicationValues
         final int termLength = termBuffer.capacity();
 
         int resultingOffset = termOffset + alignedLength;
-        logMetaDataBuffer.putLongOrdered(tailCounterOffset, packTail(termId, resultingOffset));
+        logMetaDataBuffer.putLongRelease(tailCounterOffset, packTail(termId, resultingOffset));
 
         if (resultingOffset > termLength)
         {
@@ -641,7 +666,7 @@ public final class ExclusivePublication extends ExclusivePublicationValues
         final int termLength = termBuffer.capacity();
 
         int resultingOffset = termOffset + framedLength;
-        logMetaDataBuffer.putLongOrdered(tailCounterOffset, packTail(termId, resultingOffset));
+        logMetaDataBuffer.putLongRelease(tailCounterOffset, packTail(termId, resultingOffset));
 
         if (resultingOffset > termLength)
         {
@@ -706,7 +731,7 @@ public final class ExclusivePublication extends ExclusivePublicationValues
         final int termLength = termBuffer.capacity();
 
         int resultingOffset = termOffset + alignedLength;
-        logMetaDataBuffer.putLongOrdered(tailCounterOffset, packTail(termId, resultingOffset));
+        logMetaDataBuffer.putLongRelease(tailCounterOffset, packTail(termId, resultingOffset));
 
         if (resultingOffset > termLength)
         {
@@ -747,7 +772,7 @@ public final class ExclusivePublication extends ExclusivePublicationValues
         final int termLength = termBuffer.capacity();
 
         int resultingOffset = termOffset + framedLength;
-        logMetaDataBuffer.putLongOrdered(tailCounterOffset, packTail(termId, resultingOffset));
+        logMetaDataBuffer.putLongRelease(tailCounterOffset, packTail(termId, resultingOffset));
 
         if (resultingOffset > termLength)
         {
@@ -832,7 +857,7 @@ public final class ExclusivePublication extends ExclusivePublicationValues
         final int termLength = termBuffer.capacity();
 
         int resultingOffset = termOffset + alignedLength;
-        logMetaDataBuffer.putLongOrdered(tailCounterOffset, packTail(termId, resultingOffset));
+        logMetaDataBuffer.putLongRelease(tailCounterOffset, packTail(termId, resultingOffset));
 
         if (resultingOffset > termLength)
         {
@@ -872,7 +897,7 @@ public final class ExclusivePublication extends ExclusivePublicationValues
         final int termLength = termBuffer.capacity();
 
         int resultingOffset = termOffset + framedLength;
-        logMetaDataBuffer.putLongOrdered(tailCounterOffset, packTail(termId, resultingOffset));
+        logMetaDataBuffer.putLongRelease(tailCounterOffset, packTail(termId, resultingOffset));
 
         if (resultingOffset > termLength)
         {
@@ -952,7 +977,7 @@ public final class ExclusivePublication extends ExclusivePublicationValues
         final int termLength = termBuffer.capacity();
 
         int resultingOffset = termOffset + alignedLength;
-        logMetaDataBuffer.putLongOrdered(tailCounterOffset, packTail(termId, resultingOffset));
+        logMetaDataBuffer.putLongRelease(tailCounterOffset, packTail(termId, resultingOffset));
 
         if (resultingOffset > termLength)
         {
@@ -977,7 +1002,7 @@ public final class ExclusivePublication extends ExclusivePublicationValues
         final int termLength = termBuffer.capacity();
 
         int resultingOffset = termOffset + alignedLength;
-        logMetaDataBuffer.putLongOrdered(tailCounterOffset, packTail(termId, resultingOffset));
+        logMetaDataBuffer.putLongRelease(tailCounterOffset, packTail(termId, resultingOffset));
 
         if (resultingOffset > termLength)
         {
@@ -1001,12 +1026,14 @@ public final class ExclusivePublication extends ExclusivePublicationValues
         final int length)
     {
         final int resultingOffset = termOffset + length;
-        final int lengthOfFirstFrame = buffer.getInt(offset, LITTLE_ENDIAN);
 
-        logMetaDataBuffer.putLongOrdered(tailCounterOffset, packTail(termId, resultingOffset));
-        buffer.putInt(offset, 0, LITTLE_ENDIAN);
-        termBuffer.putBytes(termOffset, buffer, offset, length);
-        frameLengthOrdered(termBuffer, termOffset, lengthOfFirstFrame);
+        logMetaDataBuffer.putLongRelease(tailCounterOffset, packTail(termId, resultingOffset));
+
+        termBuffer.putBytes(termOffset + HEADER_LENGTH, buffer, offset + HEADER_LENGTH, length - HEADER_LENGTH);
+        termBuffer.putLong(termOffset + 24, buffer.getLong(offset + 24));
+        termBuffer.putLong(termOffset + 16, buffer.getLong(offset + 16));
+        termBuffer.putLong(termOffset + 8, buffer.getLong(offset + 8));
+        termBuffer.putLongRelease(termOffset, buffer.getLong(offset));
 
         return resultingOffset;
     }

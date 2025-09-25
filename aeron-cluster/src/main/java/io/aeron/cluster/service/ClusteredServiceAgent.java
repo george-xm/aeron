@@ -15,13 +15,23 @@
  */
 package io.aeron.cluster.service;
 
-import io.aeron.*;
+import io.aeron.Aeron;
+import io.aeron.ChannelUri;
+import io.aeron.ChannelUriStringBuilder;
+import io.aeron.DirectBufferVector;
+import io.aeron.ExclusivePublication;
+import io.aeron.Image;
+import io.aeron.Publication;
+import io.aeron.Subscription;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.archive.client.ArchiveException;
 import io.aeron.archive.status.RecordingPos;
 import io.aeron.cluster.client.ClusterEvent;
 import io.aeron.cluster.client.ClusterException;
-import io.aeron.cluster.codecs.*;
+import io.aeron.cluster.codecs.CloseReason;
+import io.aeron.cluster.codecs.ClusterAction;
+import io.aeron.cluster.codecs.MessageHeaderEncoder;
+import io.aeron.cluster.codecs.SessionMessageHeaderEncoder;
 import io.aeron.driver.Configuration;
 import io.aeron.driver.DutyCycleTracker;
 import io.aeron.exceptions.AeronEvent;
@@ -31,9 +41,20 @@ import io.aeron.logbuffer.BufferClaim;
 import io.aeron.logbuffer.Header;
 import io.aeron.protocol.DataHeaderFlyweight;
 import io.aeron.status.ReadableCounter;
-import org.agrona.*;
+import org.agrona.CloseHelper;
+import org.agrona.DirectBuffer;
+import org.agrona.LangUtil;
+import org.agrona.SemanticVersion;
 import org.agrona.collections.Long2ObjectHashMap;
-import org.agrona.concurrent.*;
+import org.agrona.concurrent.Agent;
+import org.agrona.concurrent.AgentInvoker;
+import org.agrona.concurrent.AgentRunner;
+import org.agrona.concurrent.AgentTerminationException;
+import org.agrona.concurrent.CountedErrorHandler;
+import org.agrona.concurrent.EpochClock;
+import org.agrona.concurrent.IdleStrategy;
+import org.agrona.concurrent.NanoClock;
+import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.status.CountersReader;
 
 import java.util.ArrayList;
@@ -45,10 +66,12 @@ import java.util.function.Consumer;
 import static io.aeron.Aeron.NULL_VALUE;
 import static io.aeron.archive.client.AeronArchive.NULL_POSITION;
 import static io.aeron.archive.codecs.SourceLocation.LOCAL;
-import static io.aeron.cluster.ConsensusModule.CLUSTER_ACTION_FLAGS_STANDBY_SNAPSHOT;
 import static io.aeron.cluster.ConsensusModule.CLUSTER_ACTION_FLAGS_DEFAULT;
+import static io.aeron.cluster.ConsensusModule.CLUSTER_ACTION_FLAGS_STANDBY_SNAPSHOT;
 import static io.aeron.cluster.client.AeronCluster.SESSION_HEADER_LENGTH;
-import static io.aeron.cluster.service.ClusteredServiceContainer.Configuration.*;
+import static io.aeron.cluster.service.ClusteredServiceContainer.Configuration.COMMIT_POSITION_TYPE_ID;
+import static io.aeron.cluster.service.ClusteredServiceContainer.Configuration.MARK_FILE_UPDATE_INTERVAL_NS;
+import static io.aeron.cluster.service.ClusteredServiceContainer.Configuration.SNAPSHOT_TYPE_ID;
 import static org.agrona.concurrent.status.CountersReader.NULL_COUNTER_ID;
 
 abstract class ClusteredServiceAgentLhsPadding
@@ -955,9 +978,7 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
             checkForClockTick(nanoClock.nanoTime());
             archive.checkForErrorResponse();
 
-            snapshotDurationTracker.onSnapshotBegin(nanoClock.nanoTime());
             service.onTakeSnapshot(publication);
-            snapshotDurationTracker.onSnapshotEnd(nanoClock.nanoTime());
 
             awaitRecordingComplete(recordingId, publication.position(), counters, counterId, archive);
 
@@ -1020,6 +1041,7 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
         {
             long recordingId = NULL_VALUE;
             Exception exception = null;
+            snapshotDurationTracker.onSnapshotBegin(nanoClock.nanoTime());
             try
             {
                 recordingId = onTakeSnapshot(logPosition, leadershipTermId);
@@ -1027,6 +1049,10 @@ final class ClusteredServiceAgent extends ClusteredServiceAgentRhsPadding implem
             catch (final Exception ex)
             {
                 exception = ex;
+            }
+            finally
+            {
+                snapshotDurationTracker.onSnapshotEnd(nanoClock.nanoTime());
             }
 
             final long id = ackId++;

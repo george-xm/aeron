@@ -505,7 +505,7 @@ uint64_t aeron_driver_context_get_counters_free_to_reuse_timeout_ns(aeron_driver
 /**
  * Timeout for a receiver to be tracked.
  */
-#define AERON_MIN_MULTICAST_FLOW_CONTROL_RECEIVER_TIMEOUT_ENV_VAR "AERON_MIN_MULTICAST_FLOW_CONTROL_RECEIVER_TIMEOUT"
+#define AERON_FLOW_CONTROL_RECEIVER_TIMEOUT_ENV_VAR "AERON_FLOW_CONTROL_RECEIVER_TIMEOUT"
 
 int aeron_driver_context_set_flow_control_receiver_timeout_ns(aeron_driver_context_t *context, uint64_t value);
 
@@ -588,6 +588,15 @@ bool aeron_driver_context_get_tether_subscriptions(aeron_driver_context_t *conte
 
 int aeron_driver_context_set_untethered_window_limit_timeout_ns(aeron_driver_context_t *context, uint64_t value);
 uint64_t aeron_driver_context_get_untethered_window_limit_timeout_ns(aeron_driver_context_t *context);
+
+/**
+ * Timeout for an untethered subscriptions to stay in the linger state.
+ */
+#define AERON_UNTETHERED_LINGER_TIMEOUT_ENV_VAR "AERON_UNTETHERED_LINGER_TIMEOUT"
+
+
+int aeron_driver_context_set_untethered_linger_timeout_ns(aeron_driver_context_t *context, uint64_t value);
+int64_t aeron_driver_context_get_untethered_linger_timeout_ns(aeron_driver_context_t *context);
 
 /**
  * Untethered subscriptions resting timeout before they are allowed to re join an active stream.
@@ -895,8 +904,16 @@ int aeron_driver_context_set_async_executor_threads(aeron_driver_context_t *cont
 uint32_t aeron_driver_context_get_async_executor_threads(aeron_driver_context_t *context);
 
 #define AERON_CONDUCTOR_CPU_AFFINITY_ENV_VAR "AERON_CONDUCTOR_CPU_AFFINITY"
+int aeron_driver_context_set_conductor_cpu_affinity(aeron_driver_context_t *context, int32_t value);
+int32_t aeron_driver_context_get_conductor_cpu_affinity(aeron_driver_context_t *context);
+
 #define AERON_RECEIVER_CPU_AFFINITY_ENV_VAR "AERON_RECEIVER_CPU_AFFINITY"
+int aeron_driver_context_set_receiver_cpu_affinity(aeron_driver_context_t *context, int32_t value);
+int32_t aeron_driver_context_get_receiver_cpu_affinity(aeron_driver_context_t *context);
+
 #define AERON_SENDER_CPU_AFFINITY_ENV_VAR "AERON_SENDER_CPU_AFFINITY"
+int aeron_driver_context_set_sender_cpu_affinity(aeron_driver_context_t *context, int32_t value);
+int32_t aeron_driver_context_get_sender_cpu_affinity(aeron_driver_context_t *context);
 
 /**
  * Set the list of filenames to dynamic libraries to load upon context init.

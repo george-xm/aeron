@@ -31,7 +31,9 @@ import io.aeron.test.driver.TestMediaDriver;
 import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
 import org.agrona.MutableDirectBuffer;
+import org.agrona.collections.MutableInteger;
 import org.agrona.collections.MutableLong;
+import org.agrona.collections.MutableReference;
 import org.agrona.concurrent.Agent;
 import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.UnsafeBuffer;
@@ -45,13 +47,17 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
+import static io.aeron.AeronCounters.DRIVER_PUBLISHER_POS_TYPE_ID;
 import static io.aeron.CommonContext.*;
+import static io.aeron.driver.status.SendChannelStatus.SEND_CHANNEL_STATUS_TYPE_ID;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -74,12 +80,21 @@ public class ResponseChannelsTest
     {
         final MediaDriver.Context context = new MediaDriver.Context()
             .aeronDirectoryName(generateRandomDirName())
+            .dirDeleteOnShutdown(true)
             .publicationTermBufferLength(LogBufferDescriptor.TERM_MIN_LENGTH)
-            .threadingMode(ThreadingMode.SHARED)
-            .enableExperimentalFeatures(true);
+            .threadingMode(ThreadingMode.SHARED);
 
         driver1 = TestMediaDriver.launch(
-            context.clone().aeronDirectoryName(context.aeronDirectoryName() + "-1"), watcher);
+            context.clone()
+                .aeronDirectoryName(context.aeronDirectoryName() + "-1")
+                /*
+                For some reason, revoke() works much quicker against the java media driver.
+                There's a check in the LINGER state for having received a unicast EOS.  In java, we usually/always
+                see it more or less immediately, but in C, we don't.  So in C, we have to wait for the linger timeout.
+                Ultimately, it would be good to get this addressed in the C media driver.
+                 */
+                .publicationLingerTimeoutNs(200_000_000L),
+            watcher);
         driver2 = TestMediaDriver.launch(
             context.clone().aeronDirectoryName(context.aeronDirectoryName() + "-2"), watcher);
         watcher.dataCollector().add(driver1.context().aeronDirectory());
@@ -181,6 +196,89 @@ public class ResponseChannelsTest
                 Tests.awaitConnected(pubRsp);
             }
         }
+    }
+
+    @ParameterizedTest
+    @InterruptAfter(5)
+    @ValueSource(booleans = { true, false })
+    void shouldConnectResponsePublicationUsingImageAndIpc(final boolean useExclusive)
+    {
+        CloseHelper.quietClose(driver2);
+
+        try (Aeron server = Aeron.connect(new Aeron.Context().aeronDirectoryName(driver1.aeronDirectoryName()));
+            Aeron client = Aeron.connect(new Aeron.Context().aeronDirectoryName(driver1.aeronDirectoryName()));
+            Subscription subReq = server.addSubscription("aeron:ipc", REQUEST_STREAM_ID))
+        {
+            try (Subscription subRsp1 = client.addSubscription(
+                "aeron:ipc?control-mode=response|alias=client1", RESPONSE_STREAM_ID);
+                Publication pubReq1 = newPublication(
+                    useExclusive,
+                    client,
+                    "aeron:ipc?response-correlation-id=" + subRsp1.registrationId(),
+                    REQUEST_STREAM_ID);
+                Subscription subRsp2 = client.addSubscription(
+                    "aeron:ipc?control-mode=response|alias=client2", RESPONSE_STREAM_ID);
+                Publication pubReq2 = newPublication(
+                    useExclusive,
+                    client,
+                    "aeron:ipc?response-correlation-id=" + subRsp2.registrationId(),
+                    REQUEST_STREAM_ID))
+            {
+                Tests.awaitConnected(pubReq1);
+                Tests.awaitConnected(pubReq2);
+                Tests.await(() -> 2 == subReq.imageCount());
+
+                final String url1 = "aeron:ipc?control-mode=response|response-correlation-id=" +
+                    subReq.imageAtIndex(0).correlationId();
+                final String url2 = "aeron:ipc?control-mode=response|response-correlation-id=" +
+                    subReq.imageAtIndex(1).correlationId();
+
+                try (Publication pubRsp1 = newPublication(useExclusive, server, url1, RESPONSE_STREAM_ID);
+                    Publication pubRsp2 = newPublication(useExclusive, server, url2, RESPONSE_STREAM_ID))
+                {
+                    Tests.awaitConnected(subRsp1);
+                    Tests.awaitConnected(subRsp2);
+                    Tests.awaitConnected(pubRsp1);
+                    Tests.awaitConnected(pubRsp2);
+
+                    final DirectBuffer msg1 = new UnsafeBuffer("msg1".getBytes(UTF_8));
+                    final DirectBuffer msg2 = new UnsafeBuffer("msg2".getBytes(UTF_8));
+
+                    while (pubRsp1.offer(msg1) < 0)
+                    {
+                        Tests.yield();
+                    }
+
+                    while (pubRsp2.offer(msg2) < 0)
+                    {
+                        Tests.yield();
+                    }
+
+                    final long deadlineMs = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(1);
+                    int sub1FragmentCount = 0;
+                    int sub2FragmentCount = 0;
+                    while (System.currentTimeMillis() < deadlineMs)
+                    {
+                        sub1FragmentCount += subRsp1.poll((buffer, offset, length, header) -> {}, 10);
+                        sub2FragmentCount += subRsp2.poll((buffer, offset, length, header) -> {}, 10);
+                        Tests.yield();
+
+                        assertTrue(sub1FragmentCount < 2);
+                        assertTrue(sub2FragmentCount < 2);
+                    }
+                }
+            }
+        }
+    }
+
+    private static Publication newPublication(
+        final boolean useExclusive,
+        final Aeron client,
+        final String channel,
+        final int streamId)
+    {
+        return useExclusive ? client.addExclusivePublication(channel, streamId) :
+            client.addPublication(channel, streamId);
     }
 
     @Test
@@ -631,6 +729,164 @@ public class ResponseChannelsTest
                 "option conflicts with existing subscription: isResponse=" +
                 CONTROL_MODE_RESPONSE.equals(ChannelUri.parse(channel2).get(MDC_CONTROL_MODE_PARAM_NAME)) +
                 " existingChannel=" + channel1 + " channel=" + channel2));
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({ "what", "-2", "-3" })
+    void shouldRejectPublicationsWithBadResponseCorrelationIds(final String rci)
+    {
+        watcher.ignoreErrorsMatching(s -> s.contains(
+            "invalid response-correlation-id, must be a number greater than or equal to -1, or 'prototype'"));
+
+        final int streamId = 42;
+        try (Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(driver1.aeronDirectoryName())))
+        {
+            final String channel =
+                "aeron:udp?endpoint=localhost:8282|control-mode=response|response-correlation-id=" + rci;
+            assertThrows(RegistrationException.class, () -> aeron.addExclusivePublication(channel, streamId));
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({ "true", "false" })
+    @InterruptAfter(5)
+    void shouldCreateNewSendChannelWithoutPrototype(final boolean usePrototype) throws Exception
+    {
+        final IdleStrategy idleStrategy = YieldingIdleStrategy.INSTANCE;
+        final List<String> responsesA = new ArrayList<>();
+        final FragmentHandler fragmentHandlerA =
+            (buffer, offset, length, header) -> responsesA.add(buffer.getStringWithoutLengthUtf8(offset, length));
+        final MutableReference<String> firstSendChannelLabel = new MutableReference<>();
+        final MutableReference<String> secondSendChannelLabel = new MutableReference<>();
+
+        try (Aeron server = Aeron.connect(new Aeron.Context().aeronDirectoryName(driver1.aeronDirectoryName()));
+            Aeron clientA = Aeron.connect(new Aeron.Context().aeronDirectoryName(driver1.aeronDirectoryName()));
+            Aeron clientB = Aeron.connect(new Aeron.Context().aeronDirectoryName(driver2.aeronDirectoryName()));
+            ResponseServer responseServer = new ResponseServer(
+                server, (image) -> new EchoHandler(), REQUEST_ENDPOINT, REQUEST_STREAM_ID,
+                RESPONSE_CONTROL, RESPONSE_STREAM_ID, null, null))
+        {
+            responseServer.usePrototype(usePrototype);
+
+            {
+                final ResponseClient responseClientA = new ResponseClient(
+                    clientA, fragmentHandlerA, REQUEST_ENDPOINT,
+                    REQUEST_STREAM_ID, RESPONSE_CONTROL, RESPONSE_STREAM_ID);
+
+                final Supplier<String> msg = () -> "responseServer.sessionCount=" + responseServer.sessionCount() +
+                    " " + "clientA=" + responseClientA;
+
+                while (responseServer.sessionCount() < 1 ||
+                    !responseClientA.isConnected())
+                {
+                    idleStrategy.idle(run(responseServer, responseClientA));
+                    Tests.checkInterruptStatus(msg);
+                }
+
+                while (0 > responseClientA.offer(new UnsafeBuffer("hello from clientA".getBytes(UTF_8))))
+                {
+                    idleStrategy.idle(run(responseServer, responseClientA));
+                    Tests.checkInterruptStatus("unable to offer message to client A");
+                }
+
+                while (responsesA.isEmpty())
+                {
+                    idleStrategy.idle(run(responseServer, responseClientA));
+                    Tests.checkInterruptStatus("failed to receive responses");
+                }
+
+                idleStrategy.idle(run(responseClientA));
+
+                driver1.counters().forEach((counterId, typeId, keyBuffer, label) ->
+                {
+                    if (SEND_CHANNEL_STATUS_TYPE_ID == typeId && label.contains("control-mode=response"))
+                    {
+                        firstSendChannelLabel.set(label);
+                    }
+                });
+
+                responseClientA.close();
+            }
+
+            final MutableInteger publishers = new MutableInteger(0);
+            do
+            {
+                idleStrategy.idle(run(responseServer));
+                Tests.checkInterruptStatus("failed to detect publishers being closed");
+
+                publishers.set(0);
+                driver1.counters().forEach((counterId, typeId, keyBuffer, label) ->
+                {
+                    if (typeId == DRIVER_PUBLISHER_POS_TYPE_ID && !label.contains("prototype"))
+                    {
+                        publishers.increment();
+                    }
+                });
+            }
+            while (publishers.get() != 0);
+
+            try (ResponseClient responseClientB = new ResponseClient(clientB,
+                (b, o, l, h) -> {}, REQUEST_ENDPOINT, REQUEST_STREAM_ID, RESPONSE_CONTROL, RESPONSE_STREAM_ID))
+            {
+                final Supplier<String> msg = () -> "responseServer.sessionCount=" + responseServer.sessionCount() +
+                    " " + "clientB=" + responseClientB;
+
+                while (responseServer.sessionCount() < 1 ||
+                    !responseClientB.isConnected())
+                {
+                    idleStrategy.idle(run(responseServer, responseClientB));
+                    Tests.checkInterruptStatus(msg);
+                }
+
+                driver1.counters().forEach((counterId, typeId, keyBuffer, label) ->
+                {
+                    if (SEND_CHANNEL_STATUS_TYPE_ID == typeId && label.contains("control-mode=response"))
+                    {
+                        secondSendChannelLabel.set(label);
+                    }
+                });
+            }
+
+            assertEquals(usePrototype, firstSendChannelLabel.get().equals(secondSendChannelLabel.get()));
+        }
+    }
+
+    @Test
+    @InterruptAfter(15)
+    void shouldUseLargerTermLengthWhenUsingPrototype()
+    {
+        try (Aeron server = Aeron.connect(new Aeron.Context().aeronDirectoryName(driver1.aeronDirectoryName()));
+            Aeron client = Aeron.connect(new Aeron.Context().aeronDirectoryName(driver1.aeronDirectoryName()));
+            Subscription subReq = server.addSubscription(
+                "aeron:udp?endpoint=localhost:10001", REQUEST_STREAM_ID);
+            ExclusivePublication protoRspPub = server.addExclusivePublication(
+                "aeron:udp?control-mode=response|control=localhost:10002|response-correlation-id=prototype",
+                RESPONSE_STREAM_ID);
+            Subscription subRsp = client.addSubscription(
+                "aeron:udp?control-mode=response|control=localhost:10002", RESPONSE_STREAM_ID);
+            Publication pubReq = client.addPublication(
+                "aeron:udp?endpoint=localhost:10001|response-correlation-id=" + subRsp.registrationId(),
+                REQUEST_STREAM_ID))
+        {
+            protoRspPub.revokeOnClose();
+
+            Tests.awaitConnected(subReq);
+            Tests.awaitConnected(pubReq);
+            Objects.requireNonNull(subRsp);
+
+            // TODO set different term lengths, and then verify things
+
+            final Image image = subReq.imageAtIndex(0);
+            final String url = "aeron:udp?control-mode=response|control=localhost:10002|response-correlation-id=" +
+                image.correlationId();
+
+            try (Publication pubRsp = server.addPublication(url, RESPONSE_STREAM_ID))
+            {
+                //System.err.println(" :: " + pubRsp.termBufferLength());
+                Tests.awaitConnected(subRsp);
+                Tests.awaitConnected(pubRsp);
+            }
         }
     }
 

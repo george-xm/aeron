@@ -26,14 +26,30 @@ import io.aeron.driver.media.ReceiveChannelEndpoint;
 import io.aeron.driver.media.ReceiveDestinationTransport;
 import io.aeron.driver.media.SendChannelEndpoint;
 import io.aeron.driver.media.UdpChannel;
-import io.aeron.driver.status.*;
+import io.aeron.driver.status.ClientHeartbeatTimestamp;
+import io.aeron.driver.status.PublisherLimit;
+import io.aeron.driver.status.PublisherPos;
+import io.aeron.driver.status.ReceiveChannelStatus;
+import io.aeron.driver.status.ReceiveLocalSocketAddress;
+import io.aeron.driver.status.ReceiverHwm;
+import io.aeron.driver.status.ReceiverNaksSent;
+import io.aeron.driver.status.ReceiverPos;
+import io.aeron.driver.status.SendChannelStatus;
+import io.aeron.driver.status.SendLocalSocketAddress;
+import io.aeron.driver.status.SenderBpe;
+import io.aeron.driver.status.SenderLimit;
+import io.aeron.driver.status.SenderNaksReceived;
+import io.aeron.driver.status.SenderPos;
+import io.aeron.driver.status.SubscriberPos;
+import io.aeron.driver.status.SystemCounterDescriptor;
+import io.aeron.driver.status.SystemCounters;
 import io.aeron.exceptions.AeronEvent;
 import io.aeron.exceptions.AeronException;
 import io.aeron.exceptions.ControlProtocolException;
 import io.aeron.logbuffer.LogBufferDescriptor;
 import io.aeron.protocol.DataHeaderFlyweight;
-import io.aeron.protocol.SetupFlyweight;
 import io.aeron.protocol.ErrorFlyweight;
+import io.aeron.protocol.SetupFlyweight;
 import io.aeron.status.ChannelEndpointStatus;
 import org.agrona.BitUtil;
 import org.agrona.CloseHelper;
@@ -67,14 +83,83 @@ import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 import static io.aeron.ChannelUri.SPY_QUALIFIER;
-import static io.aeron.CommonContext.*;
+import static io.aeron.CommonContext.CHANNEL_RECEIVE_TIMESTAMP_OFFSET_PARAM_NAME;
+import static io.aeron.CommonContext.CHANNEL_SEND_TIMESTAMP_OFFSET_PARAM_NAME;
+import static io.aeron.CommonContext.CONTROL_MODE_RESPONSE;
+import static io.aeron.CommonContext.ENDPOINT_PARAM_NAME;
+import static io.aeron.CommonContext.IPC_CHANNEL;
+import static io.aeron.CommonContext.IPC_MEDIA;
+import static io.aeron.CommonContext.InferableBoolean;
 import static io.aeron.CommonContext.InferableBoolean.FORCE_TRUE;
 import static io.aeron.CommonContext.InferableBoolean.INFER;
-import static io.aeron.ErrorCode.*;
-import static io.aeron.driver.PublicationParams.*;
+import static io.aeron.CommonContext.MDC_CONTROL_MODE_PARAM_NAME;
+import static io.aeron.CommonContext.MDC_CONTROL_PARAM_NAME;
+import static io.aeron.CommonContext.MEDIA_RCV_TIMESTAMP_OFFSET_PARAM_NAME;
+import static io.aeron.CommonContext.MTU_LENGTH_PARAM_NAME;
+import static io.aeron.CommonContext.RECEIVER_WINDOW_LENGTH_PARAM_NAME;
+import static io.aeron.CommonContext.RESPONSE_CORRELATION_ID_PARAM_NAME;
+import static io.aeron.CommonContext.SOCKET_RCVBUF_PARAM_NAME;
+import static io.aeron.CommonContext.SOCKET_SNDBUF_PARAM_NAME;
+import static io.aeron.ErrorCode.GENERIC_ERROR;
+import static io.aeron.ErrorCode.UNKNOWN_COUNTER;
+import static io.aeron.ErrorCode.UNKNOWN_PUBLICATION;
+import static io.aeron.ErrorCode.UNKNOWN_SUBSCRIPTION;
+import static io.aeron.driver.PublicationParams.PROTOTYPE_VALUE_CORRELATION_ID;
+import static io.aeron.driver.PublicationParams.confirmMatch;
+import static io.aeron.driver.PublicationParams.getPublicationParams;
+import static io.aeron.driver.PublicationParams.validateMtuForSndbuf;
+import static io.aeron.driver.PublicationParams.validateSpiesSimulateConnection;
 import static io.aeron.driver.SubscriptionParams.validateInitialWindowForRcvBuf;
-import static io.aeron.driver.status.SystemCounterDescriptor.*;
-import static io.aeron.logbuffer.LogBufferDescriptor.*;
+import static io.aeron.driver.status.SystemCounterDescriptor.CONDUCTOR_CYCLE_TIME_THRESHOLD_EXCEEDED;
+import static io.aeron.driver.status.SystemCounterDescriptor.CONDUCTOR_MAX_CYCLE_TIME;
+import static io.aeron.driver.status.SystemCounterDescriptor.ERRORS;
+import static io.aeron.driver.status.SystemCounterDescriptor.FREE_FAILS;
+import static io.aeron.driver.status.SystemCounterDescriptor.IMAGES_REJECTED;
+import static io.aeron.driver.status.SystemCounterDescriptor.INVALID_PACKETS;
+import static io.aeron.driver.status.SystemCounterDescriptor.RESOLUTION_CHANGES;
+import static io.aeron.driver.status.SystemCounterDescriptor.RETRANSMIT_OVERFLOW;
+import static io.aeron.driver.status.SystemCounterDescriptor.UNBLOCKED_COMMANDS;
+import static io.aeron.logbuffer.LogBufferDescriptor.PARTITION_COUNT;
+import static io.aeron.logbuffer.LogBufferDescriptor.TERM_MIN_LENGTH;
+import static io.aeron.logbuffer.LogBufferDescriptor.activeTermCount;
+import static io.aeron.logbuffer.LogBufferDescriptor.computePosition;
+import static io.aeron.logbuffer.LogBufferDescriptor.correlationId;
+import static io.aeron.logbuffer.LogBufferDescriptor.endOfStreamPosition;
+import static io.aeron.logbuffer.LogBufferDescriptor.entityTag;
+import static io.aeron.logbuffer.LogBufferDescriptor.group;
+import static io.aeron.logbuffer.LogBufferDescriptor.indexByTerm;
+import static io.aeron.logbuffer.LogBufferDescriptor.initialTermId;
+import static io.aeron.logbuffer.LogBufferDescriptor.initialiseTailWithTermId;
+import static io.aeron.logbuffer.LogBufferDescriptor.isPublicationRevoked;
+import static io.aeron.logbuffer.LogBufferDescriptor.isResponse;
+import static io.aeron.logbuffer.LogBufferDescriptor.lingerTimeoutNs;
+import static io.aeron.logbuffer.LogBufferDescriptor.maxResend;
+import static io.aeron.logbuffer.LogBufferDescriptor.mtuLength;
+import static io.aeron.logbuffer.LogBufferDescriptor.nextPartitionIndex;
+import static io.aeron.logbuffer.LogBufferDescriptor.osDefaultSocketRcvbufLength;
+import static io.aeron.logbuffer.LogBufferDescriptor.osDefaultSocketSndbufLength;
+import static io.aeron.logbuffer.LogBufferDescriptor.osMaxSocketRcvbufLength;
+import static io.aeron.logbuffer.LogBufferDescriptor.osMaxSocketSndbufLength;
+import static io.aeron.logbuffer.LogBufferDescriptor.packTail;
+import static io.aeron.logbuffer.LogBufferDescriptor.pageSize;
+import static io.aeron.logbuffer.LogBufferDescriptor.positionBitsToShift;
+import static io.aeron.logbuffer.LogBufferDescriptor.publicationWindowLength;
+import static io.aeron.logbuffer.LogBufferDescriptor.rawTail;
+import static io.aeron.logbuffer.LogBufferDescriptor.receiverWindowLength;
+import static io.aeron.logbuffer.LogBufferDescriptor.rejoin;
+import static io.aeron.logbuffer.LogBufferDescriptor.reliable;
+import static io.aeron.logbuffer.LogBufferDescriptor.responseCorrelationId;
+import static io.aeron.logbuffer.LogBufferDescriptor.signalEos;
+import static io.aeron.logbuffer.LogBufferDescriptor.socketRcvbufLength;
+import static io.aeron.logbuffer.LogBufferDescriptor.socketSndbufLength;
+import static io.aeron.logbuffer.LogBufferDescriptor.sparse;
+import static io.aeron.logbuffer.LogBufferDescriptor.spiesSimulateConnection;
+import static io.aeron.logbuffer.LogBufferDescriptor.storeDefaultFrameHeader;
+import static io.aeron.logbuffer.LogBufferDescriptor.termLength;
+import static io.aeron.logbuffer.LogBufferDescriptor.tether;
+import static io.aeron.logbuffer.LogBufferDescriptor.untetheredLingerTimeoutNs;
+import static io.aeron.logbuffer.LogBufferDescriptor.untetheredRestingTimeoutNs;
+import static io.aeron.logbuffer.LogBufferDescriptor.untetheredWindowLimitTimeoutNs;
 import static io.aeron.protocol.DataHeaderFlyweight.createDefaultHeader;
 import static org.agrona.collections.ArrayListUtil.fastUnorderedRemove;
 
@@ -121,7 +206,7 @@ public final class DriverConductor implements Agent
     private final ArrayList<SubscriptionLink> subscriptionLinks = new ArrayList<>();
     private final ArrayList<CounterLink> counterLinks = new ArrayList<>();
     private final ArrayList<AeronClient> clients = new ArrayList<>();
-    private final ArrayDeque<DriverManagedResource> endOfLiveResources = new ArrayDeque<>();
+    private final ArrayDeque<DriverManagedResource> endOfLifeResources = new ArrayDeque<>();
     private final ObjectHashSet<SessionKey> activeSessionSet = new ObjectHashSet<>();
     private final EpochClock epochClock;
     private final NanoClock nanoClock;
@@ -132,6 +217,7 @@ public final class DriverConductor implements Agent
     private final MutableDirectBuffer tempBuffer;
     private final DataHeaderFlyweight defaultDataHeader = new DataHeaderFlyweight(createDefaultHeader(0, 0, 0));
     private final AtomicCounter errorCounter;
+    private final AtomicCounter imagesRejected;
     private final DutyCycleTracker dutyCycleTracker;
     private final Executor asyncTaskExecutor;
     private final boolean asyncExecutionDisabled;
@@ -155,6 +241,7 @@ public final class DriverConductor implements Agent
         clientProxy = ctx.clientProxy();
         tempBuffer = ctx.tempBuffer();
         errorCounter = ctx.systemCounters().get(ERRORS);
+        imagesRejected = ctx.systemCounters().get(IMAGES_REJECTED);
         dutyCycleTracker = ctx.conductorDutyCycleTracker();
 
         asyncTaskExecutor = ctx.asyncTaskExecutor();
@@ -219,6 +306,8 @@ public final class DriverConductor implements Agent
             }
         }
         CloseHelper.close(ctx.errorHandler(), nameResolver);
+        CloseHelper.closeAll(receiveChannelEndpointByChannelMap.values());
+        CloseHelper.closeAll(sendChannelEndpointByChannelMap.values());
         publicationImages.forEach(PublicationImage::free);
         networkPublications.forEach(NetworkPublication::free);
         ipcPublications.forEach(IpcPublication::free);
@@ -298,6 +387,7 @@ public final class DriverConductor implements Agent
             CongestionControl congestionControl = null;
             UnsafeBufferPosition hwmPos = null;
             UnsafeBufferPosition rcvPos = null;
+            AtomicCounter rcvNaksSent = null;
 
             try
             {
@@ -333,6 +423,8 @@ public final class DriverConductor implements Agent
                 final String uri = subscription.channel();
                 hwmPos = ReceiverHwm.allocate(tempBuffer, countersManager, registrationId, sessionId, streamId, uri);
                 rcvPos = ReceiverPos.allocate(tempBuffer, countersManager, registrationId, sessionId, streamId, uri);
+                rcvNaksSent =
+                    ReceiverNaksSent.allocate(tempBuffer, countersManager, registrationId, sessionId, streamId, uri);
 
                 final String sourceIdentity = Configuration.sourceIdentity(sourceAddress);
 
@@ -349,10 +441,14 @@ public final class DriverConductor implements Agent
                     termOffset,
                     flags,
                     rawLog,
+                    subscriptionParams.untetheredWindowLimitTimeoutNs,
+                    subscriptionParams.untetheredLingerTimeoutNs,
+                    subscriptionParams.untetheredRestingTimeoutNs,
                     resolveDelayGenerator(ctx, channelEndpoint.udpChannel(), subscription.group(), flags),
                     subscriberPositions,
                     hwmPos,
                     rcvPos,
+                    rcvNaksSent,
                     sourceIdentity,
                     congestionControl);
 
@@ -381,16 +477,10 @@ public final class DriverConductor implements Agent
             catch (final Exception ex)
             {
                 subscriberPositions.forEach((subscriberPosition) -> subscriberPosition.position().close());
-                CloseHelper.quietCloseAll(rawLog, congestionControl, hwmPos, rcvPos);
+                CloseHelper.quietCloseAll(rawLog, congestionControl, hwmPos, rcvPos, rcvNaksSent);
                 throw ex;
             }
         }
-    }
-
-    void onChannelEndpointError(final long statusIndicatorId, final Exception ex)
-    {
-        final String errorMessage = ex.getClass().getName() + " : " + ex.getMessage();
-        clientProxy.onError(statusIndicatorId, CHANNEL_ENDPOINT_ERROR, errorMessage);
     }
 
     void onPublicationError(
@@ -482,9 +572,9 @@ public final class DriverConductor implements Agent
             });
     }
 
-    IpcPublication getSharedIpcPublication(final long streamId)
+    IpcPublication getSharedIpcPublication(final long streamId, final long responseCorrelationId)
     {
-        return findSharedIpcPublication(ipcPublications, streamId);
+        return findSharedIpcPublication(ipcPublications, streamId, responseCorrelationId);
     }
 
     IpcPublication getIpcPublication(final long registrationId)
@@ -625,6 +715,11 @@ public final class DriverConductor implements Agent
                 "control-mode=response was specified, but no response-correlation-id set");
         }
 
+        if (PROTOTYPE_VALUE_CORRELATION_ID == params.responseCorrelationId)
+        {
+            return null;
+        }
+
         for (final PublicationImage publicationImage : publicationImages)
         {
             if (publicationImage.correlationId() == params.responseCorrelationId)
@@ -663,7 +758,7 @@ public final class DriverConductor implements Agent
         {
             final SubscriptionLink subscriptionLink = subscriptionLinks.get(i);
             if (subscriptionLink.registrationId() == responseCorrelationId &&
-                subscriptionLink instanceof NetworkSubscriptionLink)
+                subscriptionLink instanceof final NetworkSubscriptionLink link)
             {
                 if (subscriptionLink.hasSessionId())
                 {
@@ -672,27 +767,9 @@ public final class DriverConductor implements Agent
                 }
                 else
                 {
-                    final NetworkSubscriptionLink link = (NetworkSubscriptionLink)subscriptionLink;
-                    final SubscriptionParams params = new SubscriptionParams();
-                    params.hasSessionId = true;
-                    params.sessionId = responseSessionId;
-                    params.isSparse = link.isSparse();
-                    params.isTether = link.isTether();
-                    params.group = link.group();
-                    params.isReliable = link.isReliable();
-                    params.isRejoin = link.isRejoin();
-
-                    final NetworkSubscriptionLink newSubscriptionLink = new NetworkSubscriptionLink(
-                        subscriptionLink.registrationId(),
-                        subscriptionLink.channelEndpoint(),
-                        subscriptionLink.streamId(),
-                        subscriptionLink.channel(),
-                        subscriptionLink.aeronClient(),
-                        params);
-
-                    subscriptionLinks.set(i, newSubscriptionLink);
-                    addNetworkSubscriptionToReceiver(newSubscriptionLink);
-                    newSubscriptionLink.channelEndpoint().decResponseRefToStream(newSubscriptionLink.streamId);
+                    link.sessionId(responseSessionId);
+                    addNetworkSubscriptionToReceiver(link);
+                    link.channelEndpoint().decResponseRefToStream(subscriptionLink.streamId);
                 }
 
                 break;
@@ -860,6 +937,19 @@ public final class DriverConductor implements Agent
         }
     }
 
+    void unlinkIpcSubscriptions(final IpcPublication publication)
+    {
+        for (int i = 0, size = subscriptionLinks.size(); i < size; i++)
+        {
+            final SubscriptionLink link = subscriptionLinks.get(i);
+            if (link.isLinked(publication))
+            {
+                notifyUnavailableImageLink(publication.registrationId(), link);
+                link.unlink(publication);
+            }
+        }
+    }
+
     void tryCloseReceiveChannelEndpoint(final ReceiveChannelEndpoint channelEndpoint)
     {
         if (channelEndpoint.shouldBeClosed())
@@ -893,7 +983,7 @@ public final class DriverConductor implements Agent
 
         if (!isExclusive)
         {
-            publication = findSharedIpcPublication(ipcPublications, streamId);
+            publication = findSharedIpcPublication(ipcPublications, streamId, params.responseCorrelationId);
         }
 
         boolean isNewPublication = false;
@@ -934,7 +1024,7 @@ public final class DriverConductor implements Agent
         }
     }
 
-    void onRemovePublication(final long registrationId, final long correlationId)
+    void onRemovePublication(final long registrationId, final long correlationId, final boolean revoke)
     {
         PublicationLink publicationLink = null;
         final ArrayList<PublicationLink> publicationLinks = this.publicationLinks;
@@ -954,6 +1044,10 @@ public final class DriverConductor implements Agent
             throw new ControlProtocolException(UNKNOWN_PUBLICATION, "unknown publication: " + registrationId);
         }
 
+        if (revoke)
+        {
+            publicationLink.revoke();
+        }
         publicationLink.close();
         clientProxy.operationSucceeded(correlationId);
     }
@@ -1414,11 +1508,27 @@ public final class DriverConductor implements Agent
 
                 final ReceiveChannelEndpoint receiveChannelEndpoint = mdsSubscriptionLink.channelEndpoint();
 
-                final AtomicCounter localSocketAddressIndicator = ReceiveLocalSocketAddress.allocate(
-                    tempBuffer, countersManager, registrationId, receiveChannelEndpoint.statusIndicatorCounter().id());
+                AtomicCounter localSocketAddressIndicator = null;
+                ReceiveDestinationTransport transport = null;
 
-                final ReceiveDestinationTransport transport = new ReceiveDestinationTransport(
-                    udpChannel, ctx, localSocketAddressIndicator, receiveChannelEndpoint);
+                try
+                {
+                    localSocketAddressIndicator = ReceiveLocalSocketAddress.allocate(
+                        tempBuffer,
+                        countersManager,
+                        registrationId,
+                        receiveChannelEndpoint.statusIndicatorCounter().id());
+
+                    transport = new ReceiveDestinationTransport(
+                        udpChannel, ctx, localSocketAddressIndicator, receiveChannelEndpoint);
+
+                    transport.openChannel(ctx.driverConductorProxy(), null);
+                }
+                catch (final Exception ex)
+                {
+                    CloseHelper.closeAll(localSocketAddressIndicator, transport);
+                    throw ex;
+                }
 
                 receiverProxy.addDestination(receiveChannelEndpoint, transport);
                 clientProxy.operationSucceeded(correlationId);
@@ -1516,28 +1626,51 @@ public final class DriverConductor implements Agent
 
         if (null == publicationImage)
         {
-            throw new ControlProtocolException(
-                GENERIC_ERROR, "Unable to resolve image for correlationId=" + imageCorrelationId);
+            final IpcPublication foundPublication = getIpcPublication(imageCorrelationId);
+
+            if (null == foundPublication)
+            {
+                throw new ControlProtocolException(
+                    GENERIC_ERROR, "Unable to resolve image for correlationId=" + imageCorrelationId);
+            }
+
+            foundPublication.reject(position, reason, this, cachedNanoClock.nanoTime());
+        }
+        else
+        {
+            receiverProxy.rejectImage(imageCorrelationId, position, reason);
         }
 
-        receiverProxy.rejectImage(imageCorrelationId, position, reason);
+        imagesRejected.incrementRelease();
+
         clientProxy.operationSucceeded(correlationId);
+    }
+
+    void onNextAvailableSessionId(final long correlationId, final int streamId)
+    {
+        outer: while (true)
+        {
+            final int sessionId = advanceSessionId();
+
+            for (final SessionKey key : activeSessionSet)
+            {
+                if (streamId == key.streamId && sessionId == key.sessionId)
+                {
+                    continue outer;
+                }
+            }
+
+            clientProxy.onNextAvailableSessionId(correlationId, sessionId);
+            break;
+        }
     }
 
     int nextAvailableSessionId(final int streamId, final String channel)
     {
         final SessionKey sessionKey = new SessionKey(streamId, channel);
-
         while (true)
         {
-            int sessionId = nextSessionId++;
-
-            if (ctx.publicationReservedSessionIdLow() <= sessionId &&
-                sessionId <= ctx.publicationReservedSessionIdHigh())
-            {
-                nextSessionId = ctx.publicationReservedSessionIdHigh() + 1;
-                sessionId = nextSessionId++;
-            }
+            final int sessionId = advanceSessionId();
 
             sessionKey.sessionId = sessionId;
             if (!activeSessionSet.contains(sessionKey))
@@ -1545,6 +1678,19 @@ public final class DriverConductor implements Agent
                 return sessionId;
             }
         }
+    }
+
+    private int advanceSessionId()
+    {
+        int sessionId = nextSessionId++;
+
+        if (ctx.publicationReservedSessionIdLow() <= sessionId &&
+            sessionId <= ctx.publicationReservedSessionIdHigh())
+        {
+            nextSessionId = ctx.publicationReservedSessionIdHigh() + 1;
+            sessionId = nextSessionId++;
+        }
+        return sessionId;
     }
 
     private void heartbeatAndCheckTimers(final long nowNs)
@@ -1571,7 +1717,7 @@ public final class DriverConductor implements Agent
             {
                 if (toDriverCommands.unblock())
                 {
-                    ctx.systemCounters().get(UNBLOCKED_COMMANDS).incrementOrdered();
+                    ctx.systemCounters().get(UNBLOCKED_COMMANDS).incrementRelease();
                 }
             }
         }
@@ -1614,7 +1760,7 @@ public final class DriverConductor implements Agent
                     subscription.channel(),
                     joinPosition);
 
-                position.setOrdered(joinPosition);
+                position.setRelease(joinPosition);
                 subscriberPositions.add(new SubscriberPosition(subscription, null, position));
             }
         }
@@ -1704,6 +1850,7 @@ public final class DriverConductor implements Agent
         return null;
     }
 
+    @SuppressWarnings("MethodLength")
     private NetworkPublication newNetworkPublication(
         final long registrationId,
         final long clientId,
@@ -1714,6 +1861,12 @@ public final class DriverConductor implements Agent
         final PublicationParams params,
         final boolean isExclusive)
     {
+        if (params.isResponse &&
+            PROTOTYPE_VALUE_CORRELATION_ID == params.responseCorrelationId)
+        {
+            params.termLength = TERM_MIN_LENGTH;
+        }
+
         final String canonicalForm = udpChannel.canonicalForm();
 
         final FlowControl flowControl = udpChannel.isMulticast() || udpChannel.isMultiDestination() ?
@@ -1739,6 +1892,7 @@ public final class DriverConductor implements Agent
         UnsafeBufferPosition senderPos = null;
         UnsafeBufferPosition senderLmt = null;
         AtomicCounter senderBpe = null;
+        AtomicCounter senderNaksReceived = null;
         try
         {
             publisherPos = PublisherPos.allocate(
@@ -1751,6 +1905,8 @@ public final class DriverConductor implements Agent
                 tempBuffer, countersManager, registrationId, params.sessionId, streamId, channel);
             senderBpe = SenderBpe.allocate(
                 tempBuffer, countersManager, registrationId, params.sessionId, streamId, channel);
+            senderNaksReceived = SenderNaksReceived.allocate(
+                tempBuffer, countersManager, registrationId, params.sessionId, streamId, channel);
 
             countersManager.setCounterOwnerId(publisherLmt.id(), clientId);
             final AtomicCounter retransmitOverflowCounter = ctx.systemCounters().get(RETRANSMIT_OVERFLOW);
@@ -1759,10 +1915,10 @@ public final class DriverConductor implements Agent
             {
                 final int bits = LogBufferDescriptor.positionBitsToShift(params.termLength);
                 final long position = computePosition(params.termId, params.termOffset, bits, params.initialTermId);
-                publisherPos.setOrdered(position);
-                publisherLmt.setOrdered(position);
-                senderPos.setOrdered(position);
-                senderLmt.setOrdered(position);
+                publisherPos.setRelease(position);
+                publisherLmt.setRelease(position);
+                senderPos.setRelease(position);
+                senderLmt.setRelease(position);
             }
 
             final RetransmitHandler retransmitHandler = new RetransmitHandler(
@@ -1786,6 +1942,7 @@ public final class DriverConductor implements Agent
                 senderPos,
                 senderLmt,
                 senderBpe,
+                senderNaksReceived,
                 params.sessionId,
                 streamId,
                 params.initialTermId,
@@ -1803,7 +1960,8 @@ public final class DriverConductor implements Agent
         }
         catch (final Exception ex)
         {
-            CloseHelper.quietCloseAll(rawLog, publisherPos, publisherLmt, senderPos, senderLmt, senderBpe);
+            CloseHelper.quietCloseAll(
+                rawLog, publisherPos, publisherLmt, senderPos, senderLmt, senderBpe, senderNaksReceived);
             throw ex;
         }
     }
@@ -1842,6 +2000,7 @@ public final class DriverConductor implements Agent
             params.isResponse,
             params.publicationWindowLength,
             params.untetheredWindowLimitTimeoutNs,
+            params.untetheredLingerTimeoutNs,
             params.untetheredRestingTimeoutNs,
             params.maxResend,
             params.lingerTimeoutNs,
@@ -1890,6 +2049,7 @@ public final class DriverConductor implements Agent
             params.isResponse,
             params.publicationWindowLength,
             params.untetheredWindowLimitTimeoutNs,
+            params.untetheredLingerTimeoutNs,
             params.untetheredRestingTimeoutNs,
             params.maxResend,
             params.lingerTimeoutNs,
@@ -1921,6 +2081,7 @@ public final class DriverConductor implements Agent
         final boolean isResponse,
         final int publicationWindowLength,
         final long untetheredWindowLimitTimeoutNs,
+        final long untetheredLingerTimeoutNs,
         final long untetheredRestingTimeoutNs,
         final int maxResend,
         final long lingerTimeoutNs,
@@ -1961,12 +2122,14 @@ public final class DriverConductor implements Agent
         signalEos(logMetaData, signalEos);
         spiesSimulateConnection(logMetaData, spiesSimulateConnection);
         tether(logMetaData, tether);
+        isPublicationRevoked(logMetaData, false);
         group(logMetaData, group);
         isResponse(logMetaData, isResponse);
 
         entityTag(logMetaData, entityTag);
         responseCorrelationId(logMetaData, responseCorrelationId);
         untetheredWindowLimitTimeoutNs(logMetaData, untetheredWindowLimitTimeoutNs);
+        untetheredLingerTimeoutNs(logMetaData, untetheredLingerTimeoutNs);
         untetheredRestingTimeoutNs(logMetaData, untetheredRestingTimeoutNs);
         lingerTimeoutNs(logMetaData, lingerTimeoutNs);
 
@@ -2023,8 +2186,6 @@ public final class DriverConductor implements Agent
         final RawLog rawLog = logFactory.newImage(correlationId, termBufferLength, isSparse);
 
         final int publicationWindowLength = 0;
-        final long untetheredWindowLimitTimeoutNs = 0;
-        final long untetheredRestingTimeoutNs = 0;
         final int maxResend = 0;
         final long lingerTimeoutNs = 0;
         final boolean signalEos = false;
@@ -2048,8 +2209,9 @@ public final class DriverConductor implements Agent
             hasGroupSemantics,
             params.isResponse,
             publicationWindowLength,
-            untetheredWindowLimitTimeoutNs,
-            untetheredRestingTimeoutNs,
+            params.untetheredWindowLimitTimeoutNs,
+            params.untetheredLingerTimeoutNs,
+            params.untetheredRestingTimeoutNs,
             maxResend,
             lingerTimeoutNs,
             signalEos,
@@ -2086,8 +2248,11 @@ public final class DriverConductor implements Agent
                 validateMtuForSndbuf(
                     params, channelEndpoint.socketSndbufLength(), ctx, udpChannel.originalUriString(), null);
 
-                sendChannelEndpointByChannelMap.put(udpChannel.canonicalForm(), channelEndpoint);
+                channelEndpoint.openChannel(ctx.driverConductorProxy());
+                channelEndpoint.indicateActive();
+
                 senderProxy.registerSendChannelEndpoint(channelEndpoint);
+                sendChannelEndpointByChannelMap.put(udpChannel.canonicalForm(), channelEndpoint);
             }
             catch (final Exception ex)
             {
@@ -2245,7 +2410,7 @@ public final class DriverConductor implements Agent
 
                 countersManager.setCounterReferenceId(position.id(), image.correlationId());
 
-                position.setOrdered(joinPosition);
+                position.setRelease(joinPosition);
                 subscriptionLink.link(image, position);
                 image.addSubscriber(subscriptionLink, position, cachedNanoClock.nanoTime());
 
@@ -2261,12 +2426,14 @@ public final class DriverConductor implements Agent
         }
     }
 
-    private void linkIpcSubscriptions(final IpcPublication publication)
+    void linkIpcSubscriptions(final IpcPublication publication)
     {
         for (int i = 0, size = subscriptionLinks.size(); i < size; i++)
         {
             final SubscriptionLink subscription = subscriptionLinks.get(i);
-            if (subscription.matches(publication) && !subscription.isLinked(publication))
+            if (subscription.matches(publication) &&
+                !subscription.isLinked(publication) &&
+                publication.isAcceptingSubscriptions())
             {
                 clientProxy.onAvailableImage(
                     publication.registrationId(),
@@ -2294,7 +2461,7 @@ public final class DriverConductor implements Agent
 
         countersManager.setCounterReferenceId(position.id(), publication.registrationId());
 
-        position.setOrdered(joinPosition);
+        position.setRelease(joinPosition);
         subscription.link(publication, position);
         publication.addSubscriber(subscription, position, cachedNanoClock.nanoTime());
 
@@ -2315,7 +2482,7 @@ public final class DriverConductor implements Agent
 
         countersManager.setCounterReferenceId(position.id(), publication.registrationId());
 
-        position.setOrdered(joinPosition);
+        position.setRelease(joinPosition);
         subscription.link(publication, position);
         publication.addSubscriber(subscription, position, cachedNanoClock.nanoTime());
 
@@ -2350,8 +2517,11 @@ public final class DriverConductor implements Agent
 
                 validateInitialWindowForRcvBuf(params, channel, channelEndpoint.socketRcvbufLength(), ctx, null);
 
-                receiveChannelEndpointByChannelMap.put(udpChannel.canonicalForm(), channelEndpoint);
+                channelEndpoint.openChannel(ctx.driverConductorProxy());
+                channelEndpoint.indicateActive();
+
                 receiverProxy.registerReceiveChannelEndpoint(channelEndpoint);
+                receiveChannelEndpointByChannelMap.put(udpChannel.canonicalForm(), channelEndpoint);
             }
             catch (final Exception ex)
             {
@@ -2414,7 +2584,7 @@ public final class DriverConductor implements Agent
             final AtomicCounter counter = ClientHeartbeatTimestamp.allocate(tempBuffer, countersManager, clientId);
             final int counterId = counter.id();
 
-            counter.setOrdered(cachedEpochClock.time());
+            counter.setRelease(cachedEpochClock.time());
             countersManager.setCounterOwnerId(counterId, clientId);
             countersManager.setCounterRegistrationId(counterId, clientId);
 
@@ -2460,8 +2630,8 @@ public final class DriverConductor implements Agent
                 final int positionBitsToShift = positionBitsToShift(params.termLength);
                 final long position = computePosition(
                     params.termId, params.termOffset, positionBitsToShift, params.initialTermId);
-                publisherPosition.setOrdered(position);
-                publisherLimit.setOrdered(position);
+                publisherPosition.setRelease(position);
+                publisherLimit.setRelease(position);
             }
 
             final IpcPublication publication = new IpcPublication(
@@ -2477,6 +2647,8 @@ public final class DriverConductor implements Agent
                 isExclusive,
                 params);
 
+            findAndUpdateResponseIpcSubscription(params, publication);
+
             ipcPublications.add(publication);
             activeSessionSet.add(new SessionKey(params.sessionId, streamId, IPC_MEDIA));
 
@@ -2486,6 +2658,31 @@ public final class DriverConductor implements Agent
         {
             CloseHelper.quietCloseAll(rawLog, publisherPosition, publisherLimit);
             throw ex;
+        }
+    }
+
+    private void findAndUpdateResponseIpcSubscription(final PublicationParams params, final IpcPublication publication)
+    {
+        if (Aeron.NULL_VALUE != params.responseCorrelationId)
+        {
+            for (final IpcPublication ipcPublication : ipcPublications)
+            {
+                if (ipcPublication.registrationId() == params.responseCorrelationId)
+                {
+                    for (int i = 0, n = subscriptionLinks.size(); i < n; i++)
+                    {
+                        final SubscriptionLink subscriptionLink = subscriptionLinks.get(i);
+                        if (ipcPublication.responseCorrelationId() == subscriptionLink.registrationId &&
+                            subscriptionLink instanceof IpcSubscriptionLink)
+                        {
+                            subscriptionLink.sessionId(publication.sessionId());
+                            break;
+                        }
+                    }
+
+                    break;
+                }
+            }
         }
     }
 
@@ -2544,7 +2741,9 @@ public final class DriverConductor implements Agent
     }
 
     private static IpcPublication findSharedIpcPublication(
-        final ArrayList<IpcPublication> ipcPublications, final long streamId)
+        final ArrayList<IpcPublication> ipcPublications,
+        final long streamId,
+        final long responseCorrelationId)
     {
         IpcPublication ipcPublication = null;
 
@@ -2553,7 +2752,8 @@ public final class DriverConductor implements Agent
             final IpcPublication publication = ipcPublications.get(i);
             if (publication.streamId() == streamId &&
                 !publication.isExclusive() &&
-                IpcPublication.State.ACTIVE == publication.state())
+                IpcPublication.State.ACTIVE == publication.state() &&
+                publication.responseCorrelationId() == responseCorrelationId)
             {
                 ipcPublication = publication;
                 break;
@@ -2585,7 +2785,7 @@ public final class DriverConductor implements Agent
             if (resource.hasReachedEndOfLife())
             {
                 CloseHelper.close(ctx.errorHandler(), resource::close);
-                endOfLiveResources.add(resource);
+                endOfLifeResources.add(resource);
                 fastUnorderedRemove(list, i, lastIndex--);
             }
         }
@@ -2597,7 +2797,7 @@ public final class DriverConductor implements Agent
 
         for (int i = 0; i < freeLimit; i++)
         {
-            final DriverManagedResource resource = endOfLiveResources.pollFirst();
+            final DriverManagedResource resource = endOfLifeResources.pollFirst();
             if (null == resource)
             {
                 break;
@@ -2609,8 +2809,8 @@ public final class DriverConductor implements Agent
             }
             else
             {
-                ctx.systemCounters().get(FREE_FAILS).incrementOrdered();
-                endOfLiveResources.addLast(resource);
+                ctx.systemCounters().get(FREE_FAILS).incrementRelease();
+                endOfLifeResources.addLast(resource);
             }
         }
 
@@ -2825,6 +3025,7 @@ public final class DriverConductor implements Agent
         }
     }
 
+    @SuppressWarnings({ "unused", "UnnecessaryReturnStatement" })
     private static void validateExperimentalFeatures(final boolean enableExperimentalFeatures, final UdpChannel channel)
     {
         if (enableExperimentalFeatures)
@@ -2832,13 +3033,9 @@ public final class DriverConductor implements Agent
             return;
         }
 
-        if (null != channel.channelUri().get(RESPONSE_CORRELATION_ID_PARAM_NAME) ||
-            ControlMode.RESPONSE == channel.controlMode())
-        {
-            throw new IllegalArgumentException(
-                "Response Channels is an experimental feature, and " +
-                "MediaDriver.Context.enableExperimentalFeatures is false");
-        }
+        /*
+         * Put experimental feature validation here.
+         */
     }
 
     private static FeedbackDelayGenerator resolveDelayGenerator(
@@ -2854,7 +3051,8 @@ public final class DriverConductor implements Agent
         final Long nakDelayNs = channel.nakDelayNs();
         if (null != nakDelayNs)
         {
-            final long retryDelayNs = nakDelayNs * ctx.nakUnicastRetryDelayRatio();
+            final long retryDelayNs =
+                Math.max(nakDelayNs, Configuration.NAK_UNICAST_DELAY_MIN_VALUE_NS) * ctx.nakUnicastRetryDelayRatio();
             return new StaticDelayGenerator(nakDelayNs, retryDelayNs);
         }
         else

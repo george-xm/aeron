@@ -94,7 +94,6 @@ int aeron_publication_close(
     if (NULL != publication)
     {
         bool is_closed;
-
         AERON_GET_ACQUIRE(is_closed, publication->is_closed);
         if (!is_closed)
         {
@@ -103,6 +102,7 @@ int aeron_publication_close(
             if (aeron_client_conductor_async_close_publication(
                 publication->conductor, publication, on_close_complete, on_close_complete_clientd) < 0)
             {
+                AERON_APPEND_ERR("%s", "");
                 return -1;
             }
         }
@@ -484,7 +484,7 @@ int64_t aeron_publication_offer(
     AERON_GET_ACQUIRE(is_closed, publication->is_closed);
     if (!is_closed)
     {
-        const int64_t limit = aeron_counter_get_volatile(publication->position_limit);
+        const int64_t limit = aeron_counter_get_acquire(publication->position_limit);
         const int32_t term_count = aeron_logbuffer_active_term_count(publication->log_meta_data);
         const size_t index = aeron_logbuffer_index_by_term_count(term_count);
         const int64_t raw_tail = aeron_publication_raw_tail_volatile(
@@ -574,7 +574,7 @@ int64_t aeron_publication_offerv(
     AERON_GET_ACQUIRE(is_closed, publication->is_closed);
     if (!is_closed)
     {
-        const int64_t limit = aeron_counter_get_volatile(publication->position_limit);
+        const int64_t limit = aeron_counter_get_acquire(publication->position_limit);
         const int32_t term_count = aeron_logbuffer_active_term_count(publication->log_meta_data);
         const size_t index = aeron_logbuffer_index_by_term_count(term_count);
         const int64_t raw_tail = aeron_publication_raw_tail_volatile(
@@ -663,7 +663,7 @@ int64_t aeron_publication_try_claim(aeron_publication_t *publication, size_t len
     AERON_GET_ACQUIRE(is_closed, publication->is_closed);
     if (!is_closed)
     {
-        const int64_t limit = aeron_counter_get_volatile(publication->position_limit);
+        const int64_t limit = aeron_counter_get_acquire(publication->position_limit);
         const int32_t term_count = aeron_logbuffer_active_term_count(publication->log_meta_data);
         const size_t index = aeron_logbuffer_index_by_term_count(term_count);
         const int64_t raw_tail = aeron_publication_raw_tail_volatile(
@@ -808,7 +808,7 @@ int64_t aeron_publication_position_limit(aeron_publication_t *publication)
         return AERON_PUBLICATION_CLOSED;
     }
 
-    return aeron_counter_get_volatile(publication->position_limit);
+    return aeron_counter_get_acquire(publication->position_limit);
 }
 
 extern int64_t aeron_publication_new_position(

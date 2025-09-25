@@ -15,6 +15,9 @@
  */
 package io.aeron.driver;
 
+import io.aeron.Aeron;
+import io.aeron.CncFileDescriptor;
+import io.aeron.CommonContext;
 import io.aeron.driver.MediaDriver.Context;
 import io.aeron.driver.media.ControlTransportPoller;
 import io.aeron.driver.media.DataTransportPoller;
@@ -22,14 +25,16 @@ import io.aeron.driver.media.UdpTransportPoller;
 import io.aeron.driver.status.SystemCounterDescriptor;
 import io.aeron.exceptions.ConfigurationException;
 import org.agrona.ErrorHandler;
+import org.agrona.collections.ObjectHashSet;
 import org.agrona.concurrent.CountedErrorHandler;
+import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.status.AtomicCounter;
 import org.hamcrest.CoreMatchers;
-import org.hamcrest.MatcherAssert;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -37,6 +42,7 @@ import java.io.IOException;
 import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.CyclicBarrier;
@@ -45,10 +51,33 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
-import static io.aeron.driver.Configuration.*;
+import static io.aeron.driver.Configuration.CALLER_RUNS_TASK_EXECUTOR;
+import static io.aeron.driver.Configuration.COUNTERS_VALUES_BUFFER_LENGTH_MAX;
+import static io.aeron.driver.Configuration.COUNTERS_VALUES_BUFFER_LENGTH_MIN;
+import static io.aeron.driver.Configuration.ERROR_BUFFER_LENGTH_DEFAULT;
+import static io.aeron.driver.Configuration.LOSS_REPORT_BUFFER_LENGTH_DEFAULT;
+import static io.aeron.driver.Configuration.NAK_MAX_BACKOFF_DEFAULT_NS;
+import static io.aeron.driver.Configuration.NAK_MULTICAST_MAX_BACKOFF_PROP_NAME;
+import static io.aeron.driver.Configuration.NAK_UNICAST_DELAY_MIN_VALUE_NS;
+import static io.aeron.driver.Configuration.UNTETHERED_LINGER_TIMEOUT_PROP_NAME;
+import static io.aeron.driver.Configuration.UNTETHERED_WINDOW_LIMIT_TIMEOUT_DEFAULT_NS;
+import static io.aeron.driver.Configuration.UNTETHERED_WINDOW_LIMIT_TIMEOUT_PROP_NAME;
 import static io.aeron.logbuffer.LogBufferDescriptor.TERM_MAX_LENGTH;
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertThrowsExactly;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 class MediaDriverContextTest
 {
@@ -109,7 +138,7 @@ class MediaDriverContextTest
     }
 
     @ParameterizedTest
-    @ValueSource(ints = { -76, 0, 1024 * 1024 - 1, 1024 * 1024 * 1024 })
+    @ValueSource(ints = { -76, 0, COUNTERS_VALUES_BUFFER_LENGTH_MIN - 1, COUNTERS_VALUES_BUFFER_LENGTH_MAX + 1 })
     void counterValuesBufferLengthMustBeWithinRange(final int length)
     {
         context.counterValuesBufferLength(length);
@@ -139,7 +168,7 @@ class MediaDriverContextTest
         context.lossReportBufferLength(length);
 
         final ConfigurationException exception = assertThrows(ConfigurationException.class, context::conclude);
-        assertTrue(exception.getMessage().contains("lossReportBufferLength"));
+        assertThat(exception.getMessage(), containsString("lossReportBufferLength"));
     }
 
     @ParameterizedTest
@@ -149,7 +178,7 @@ class MediaDriverContextTest
         context.publicationTermWindowLength(length);
 
         final ConfigurationException exception = assertThrows(ConfigurationException.class, context::conclude);
-        assertTrue(exception.getMessage().contains("publicationTermWindowLength"));
+        assertThat(exception.getMessage(), containsString("publicationTermWindowLength"));
     }
 
     @ParameterizedTest
@@ -159,7 +188,7 @@ class MediaDriverContextTest
         context.ipcPublicationTermWindowLength(length);
 
         final ConfigurationException exception = assertThrows(ConfigurationException.class, context::conclude);
-        assertTrue(exception.getMessage().contains("ipcPublicationTermWindowLength"));
+        assertThat(exception.getMessage(), containsString("ipcPublicationTermWindowLength"));
     }
 
     @ParameterizedTest
@@ -220,10 +249,13 @@ class MediaDriverContextTest
 
         assertEquals(asyncExecutorThreadCount, threads.size());
         assertEquals(asyncExecutorThreadCount, threadPoolExecutor.getPoolSize());
+
+        final ObjectHashSet<String> uniqueNames = new ObjectHashSet<>(asyncExecutorThreadCount);
         for (final Thread t : threads)
         {
-            MatcherAssert.assertThat(t.getName(), CoreMatchers.startsWith("async-task-executor-"));
+            assertThat(t.getName(), CoreMatchers.startsWith("async-executor"));
             assertTrue(t.isDaemon());
+            assertTrue(uniqueNames.add(t.getName()));
         }
     }
 
@@ -327,10 +359,148 @@ class MediaDriverContextTest
         assertSame(context.countedErrorHandler(), getErrorHandler(dataTransportPoller));
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = { 4096, 2 * 1024 * 1024 })
+    void shouldAddFilePageSizeToTheCncFile(final int filePageSize) throws IOException
+    {
+        final Path dir = Paths.get(CommonContext.generateRandomDirName());
+        Files.createDirectories(dir);
+        context
+            .aeronDirectoryName(dir.toString())
+            .dirDeleteOnShutdown(true)
+            .filePageSize(filePageSize);
+
+        context.conclude();
+
+        final UnsafeBuffer metaDataBuffer = CncFileDescriptor.createMetaDataBuffer(context.cncByteBuffer());
+        assertEquals(filePageSize, CncFileDescriptor.filePageSize(metaDataBuffer));
+    }
+
     private static ErrorHandler getErrorHandler(final UdpTransportPoller transportPoller) throws Exception
     {
         final Field field = UdpTransportPoller.class.getDeclaredField("errorHandler");
         field.setAccessible(true);
         return (ErrorHandler)field.get(transportPoller);
+    }
+
+    @Test
+    void shouldTestDefaultUntetheredWindowLimitTimeout()
+    {
+        assertEquals(UNTETHERED_WINDOW_LIMIT_TIMEOUT_DEFAULT_NS, context.untetheredWindowLimitTimeoutNs());
+    }
+
+    @Test
+    void shouldTestDefaultUntetheredLingerTimeout()
+    {
+        assertEquals(Aeron.NULL_VALUE, context.untetheredLingerTimeoutNs());
+    }
+
+    @Test
+    void shouldHonorSystemPropertyUntetheredLingerTimeout()
+    {
+        System.setProperty(UNTETHERED_LINGER_TIMEOUT_PROP_NAME, "222ms");
+        try
+        {
+            final Context ctx = new Context();
+            assertEquals(TimeUnit.MILLISECONDS.toNanos(222), ctx.untetheredLingerTimeoutNs());
+        }
+        finally
+        {
+            System.clearProperty(UNTETHERED_LINGER_TIMEOUT_PROP_NAME);
+        }
+    }
+
+    @Test
+    void shouldHonorSystemPropertyWindowLimitTimeout()
+    {
+        System.setProperty(UNTETHERED_WINDOW_LIMIT_TIMEOUT_PROP_NAME, "444ms");
+        try
+        {
+            final Context ctx = new Context();
+            assertEquals(TimeUnit.MILLISECONDS.toNanos(444), ctx.untetheredWindowLimitTimeoutNs());
+        }
+        finally
+        {
+            System.clearProperty(UNTETHERED_WINDOW_LIMIT_TIMEOUT_PROP_NAME);
+        }
+    }
+
+    @Test
+    void shouldHonorSystemPropertyOverrideUntetheredLingerTimeoutAndWindowTimeout()
+    {
+        System.setProperty(UNTETHERED_LINGER_TIMEOUT_PROP_NAME, "222ms");
+        System.setProperty(UNTETHERED_WINDOW_LIMIT_TIMEOUT_PROP_NAME, "444ms");
+        try
+        {
+            final Context ctx = new Context();
+            assertEquals(TimeUnit.MILLISECONDS.toNanos(222), ctx.untetheredLingerTimeoutNs());
+            assertEquals(TimeUnit.MILLISECONDS.toNanos(444), ctx.untetheredWindowLimitTimeoutNs());
+        }
+        finally
+        {
+            System.clearProperty(UNTETHERED_LINGER_TIMEOUT_PROP_NAME);
+            System.clearProperty(UNTETHERED_WINDOW_LIMIT_TIMEOUT_PROP_NAME);
+        }
+    }
+
+    @Test
+    void shouldUseNullForUntetheredLingerTimeoutEvenIfWindowIsSet()
+    {
+        final Context ctx = new Context().untetheredWindowLimitTimeoutNs(35326745);
+        assertEquals(Aeron.NULL_VALUE, ctx.untetheredLingerTimeoutNs());
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = { Long.MIN_VALUE, -1, 0, NAK_UNICAST_DELAY_MIN_VALUE_NS - 1 })
+    void shouldRejectInvalidNakUnicastDelay(final long nakUnicastDelayNs)
+    {
+        context.nakUnicastDelayNs(nakUnicastDelayNs);
+
+        final ConfigurationException exception =
+            assertThrowsExactly(ConfigurationException.class, context::conclude);
+        assertEquals(
+            "ERROR - nakUnicastDelayNs less than min size of " + NAK_UNICAST_DELAY_MIN_VALUE_NS + ": " +
+                nakUnicastDelayNs,
+            exception.getMessage());
+    }
+
+    @Test
+    void shouldAcceptMinNakUnicastDelay(final @TempDir Path tempDir)
+    {
+        context
+            .aeronDirectoryName(tempDir.toString())
+            .nakUnicastDelayNs(NAK_UNICAST_DELAY_MIN_VALUE_NS);
+
+        context.conclude();
+
+        assertEquals(NAK_UNICAST_DELAY_MIN_VALUE_NS, context.nakUnicastDelayNs());
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = { Long.MIN_VALUE, -1, 0 })
+    void shouldRejectInvalidNakUnicastRetryDelayRatio(final long nakUnicastRetryDelayRatio)
+    {
+        context.nakUnicastRetryDelayRatio(nakUnicastRetryDelayRatio);
+
+        final ConfigurationException exception =
+            assertThrowsExactly(ConfigurationException.class, context::conclude);
+        assertEquals(
+            "ERROR - nakUnicastRetryDelayRatio less than min size of 1: " +
+                nakUnicastRetryDelayRatio,
+            exception.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"5000000000,1000000000000"})
+    void shouldRejectInvalidNakUnicastDelayRetryCombination(
+        final long nakUnicastDelayNs, final long nakUnicastRetryDelayRatio)
+    {
+        context
+            .nakUnicastDelayNs(nakUnicastDelayNs)
+            .nakUnicastRetryDelayRatio(nakUnicastRetryDelayRatio);
+
+        final ArithmeticException exception =
+            assertThrowsExactly(ArithmeticException.class, context::conclude);
+        assertEquals("long overflow", exception.getMessage());
     }
 }

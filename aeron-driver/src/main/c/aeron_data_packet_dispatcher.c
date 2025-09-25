@@ -500,7 +500,7 @@ int aeron_data_packet_dispatcher_on_setup(
                 if (destination->conductor_fields.udp_channel->is_multicast &&
                     destination->conductor_fields.udp_channel->multicast_ttl < header->ttl)
                 {
-                    aeron_counter_ordered_increment(endpoint->possible_ttl_asymmetry_counter, 1);
+                    aeron_counter_increment_release(endpoint->possible_ttl_asymmetry_counter);
                 }
 
                 if (aeron_data_packet_dispatcher_create_publication(

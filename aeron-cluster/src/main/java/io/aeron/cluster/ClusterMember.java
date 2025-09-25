@@ -24,13 +24,14 @@ import io.aeron.cluster.client.ClusterException;
 import io.aeron.exceptions.RegistrationException;
 import org.agrona.CloseHelper;
 import org.agrona.ErrorHandler;
-import org.agrona.collections.ArrayUtil;
 import org.agrona.collections.Int2ObjectHashMap;
 
 import java.util.List;
 
 import static io.aeron.Aeron.NULL_VALUE;
+import static io.aeron.ChannelUri.replacePortWithWildcard;
 import static io.aeron.CommonContext.ENDPOINT_PARAM_NAME;
+import static io.aeron.CommonContext.MDC_CONTROL_PARAM_NAME;
 import static io.aeron.archive.client.AeronArchive.NULL_POSITION;
 
 /**
@@ -721,18 +722,20 @@ public final class ClusterMember
     /**
      * Add the publications for sending consensus messages to the other members of the cluster.
      *
-     * @param members         of the cluster.
-     * @param exclude         this member when adding publications.
-     * @param channelTemplate for the publications.
-     * @param streamId        for the publications.
-     * @param aeron           to add the publications to.
-     * @param errorHandler    to log registration exceptions to.
+     * @param members               of the cluster.
+     * @param thisMember            this member when adding publications.
+     * @param channelTemplate       for the publications.
+     * @param streamId              for the publications.
+     * @param bindConsensusControl  if the control endpoint should be bound for the publication.
+     * @param aeron                 to add the publications to.
+     * @param errorHandler          to log registration exceptions to.
      */
     public static void addConsensusPublications(
         final ClusterMember[] members,
-        final ClusterMember exclude,
+        final ClusterMember thisMember,
         final String channelTemplate,
         final int streamId,
+        final boolean bindConsensusControl,
         final Aeron aeron,
         final ErrorHandler errorHandler)
     {
@@ -740,9 +743,10 @@ public final class ClusterMember
 
         for (final ClusterMember member : members)
         {
-            if (member.id != exclude.id)
+            if (member.id != thisMember.id)
             {
                 channelUri.put(ENDPOINT_PARAM_NAME, member.consensusEndpoint);
+                setControlEndpoint(channelUri, bindConsensusControl, thisMember.consensusEndpoint);
                 member.consensusChannel = channelUri.toString();
                 tryAddPublication(member, streamId, aeron, errorHandler);
             }
@@ -752,27 +756,32 @@ public final class ClusterMember
     /**
      * Add an exclusive {@link Publication} for communicating to a member on the consensus channel.
      *
-     * @param member          to which the publication is addressed.
-     * @param channelTemplate for the target member.
-     * @param streamId        for the target member.
-     * @param aeron           from which the publication will be created.
-     * @param errorHandler    to log registration exceptions to.
+     * @param thisMember            from which the publication is addressed.
+     * @param otherMember           to which the publication is addressed.
+     * @param channelTemplate       for the target member.
+     * @param streamId              for the target member.
+     * @param bindConsensusControl  if the control endpoint should be bound for the publication.
+     * @param aeron                 from which the publication will be created.
+     * @param errorHandler          to log registration exceptions to.
      */
     public static void addConsensusPublication(
-        final ClusterMember member,
+        final ClusterMember thisMember,
+        final ClusterMember otherMember,
         final String channelTemplate,
         final int streamId,
+        final boolean bindConsensusControl,
         final Aeron aeron,
         final ErrorHandler errorHandler)
     {
-        if (null == member.consensusChannel)
+        if (null == otherMember.consensusChannel)
         {
             final ChannelUri channelUri = ChannelUri.parse(channelTemplate);
-            channelUri.put(ENDPOINT_PARAM_NAME, member.consensusEndpoint);
-            member.consensusChannel = channelUri.toString();
+            channelUri.put(ENDPOINT_PARAM_NAME, otherMember.consensusEndpoint);
+            setControlEndpoint(channelUri, bindConsensusControl, thisMember.consensusEndpoint);
+            otherMember.consensusChannel = channelUri.toString();
         }
 
-        tryAddPublication(member, streamId, aeron, errorHandler);
+        tryAddPublication(otherMember, streamId, aeron, errorHandler);
     }
 
     /**
@@ -1241,49 +1250,6 @@ public final class ClusterMember
     }
 
     /**
-     * Is the string of member endpoints not duplicated in the members.
-     *
-     * @param members   to check if the provided endpoints have a duplicate.
-     * @param endpoints to check for duplicates.
-     * @return true if no duplicate is found otherwise false.
-     */
-    public static boolean notDuplicateEndpoint(final ClusterMember[] members, final String endpoints)
-    {
-        for (final ClusterMember member : members)
-        {
-            if (member.endpoints.equals(endpoints))
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    /**
-     * Find the index at which a member id is present.
-     *
-     * @param clusterMembers to be searched.
-     * @param memberId       to search for.
-     * @return the index at which the member id is found otherwise {@link ArrayUtil#UNKNOWN_INDEX}.
-     */
-    public static int findMemberIndex(final ClusterMember[] clusterMembers, final int memberId)
-    {
-        final int length = clusterMembers.length;
-        int index = ArrayUtil.UNKNOWN_INDEX;
-
-        for (int i = 0; i < length; i++)
-        {
-            if (memberId == clusterMembers[i].id)
-            {
-                index = i;
-            }
-        }
-
-        return index;
-    }
-
-    /**
      * Find a {@link ClusterMember} with a given id.
      *
      * @param clusterMembers to search.
@@ -1301,24 +1267,6 @@ public final class ClusterMember
         }
 
         return null;
-    }
-
-    /**
-     * Find the highest member id in an array of members.
-     *
-     * @param clusterMembers to search for the highest id.
-     * @return the highest id otherwise {@link Aeron#NULL_VALUE} if empty.
-     */
-    public static int highMemberId(final ClusterMember[] clusterMembers)
-    {
-        int highId = Aeron.NULL_VALUE;
-
-        for (final ClusterMember member : clusterMembers)
-        {
-            highId = Math.max(highId, member.id);
-        }
-
-        return highId;
     }
 
     /**
@@ -1357,6 +1305,22 @@ public final class ClusterMember
         {
             clusterMember.isLeader(clusterMember.id() == leaderMemberId);
         }
+    }
+
+    static void setControlEndpoint(final ChannelUri channelUri, final boolean shouldBind, final String endpoint)
+    {
+        if (!shouldBind)
+        {
+            return;
+        }
+
+        final String controlEndpoint = replacePortWithWildcard(endpoint);
+        if (null == controlEndpoint)
+        {
+            return;
+        }
+
+        channelUri.put(MDC_CONTROL_PARAM_NAME, controlEndpoint);
     }
 
     /**

@@ -184,6 +184,19 @@ int aeron_client_conductor_init(aeron_client_conductor_t *conductor, aeron_conte
     conductor->resource_linger_duration_ns = context->resource_linger_duration_ns;
     conductor->idle_sleep_duration_ns = context->idle_sleep_duration_ns;
 
+    conductor->control_protocol_version = 0;
+
+    if (AERON_SYSTEM_COUNTER_ID_CONTROL_PROTOCOL_VERSION == aeron_counters_reader_find_by_type_id_and_registration_id(
+        &conductor->counters_reader,
+        AERON_COUNTER_SYSTEM_COUNTER_TYPE_ID,
+        AERON_SYSTEM_COUNTER_ID_CONTROL_PROTOCOL_VERSION))
+    {
+        int64_t *addr = aeron_counters_reader_addr(
+            &conductor->counters_reader,
+            AERON_SYSTEM_COUNTER_ID_CONTROL_PROTOCOL_VERSION);
+        conductor->control_protocol_version = (int32_t)aeron_counter_get_acquire(addr);
+    }
+
     long long now_ns = context->nano_clock();
 
     conductor->time_of_last_keepalive_ns = now_ns;
@@ -355,6 +368,19 @@ void aeron_client_conductor_on_driver_response(int32_t type_id, uint8_t *buffer,
             break;
         }
 
+        case AERON_RESPONSE_ON_STATIC_COUNTER:
+        {
+            aeron_static_counter_response_t *response = (aeron_static_counter_response_t *)buffer;
+
+            if (length < sizeof(aeron_static_counter_response_t))
+            {
+                goto malformed_command;
+            }
+
+            result = aeron_client_conductor_on_static_counter(conductor, response);
+            break;
+        }
+
         case AERON_RESPONSE_ON_PUBLICATION_ERROR:
         {
             aeron_publication_error_t *response = (aeron_publication_error_t *)buffer;
@@ -368,16 +394,16 @@ void aeron_client_conductor_on_driver_response(int32_t type_id, uint8_t *buffer,
             break;
         }
 
-        case AERON_RESPONSE_ON_STATIC_COUNTER:
+        case AERON_RESPONSE_ON_NEXT_AVAILABLE_SESSION_ID:
         {
-            aeron_static_counter_response_t *response = (aeron_static_counter_response_t *)buffer;
+            aeron_next_available_session_id_response_t *response = (aeron_next_available_session_id_response_t *)buffer;
 
-            if (length < sizeof(aeron_static_counter_response_t))
+            if (length < sizeof(aeron_next_available_session_id_response_t))
             {
                 goto malformed_command;
             }
 
-            result = aeron_client_conductor_on_static_counter(conductor, response);
+            result = aeron_client_conductor_on_next_available_session_id(conductor, response);
             break;
         }
 
@@ -467,7 +493,7 @@ int aeron_client_conductor_check_liveness(aeron_client_conductor_t *conductor, l
                 conductor->heartbeat_timestamp.addr = aeron_counters_reader_addr(
                     &conductor->counters_reader, conductor->heartbeat_timestamp.counter_id);
 
-                aeron_counter_set_ordered(conductor->heartbeat_timestamp.addr, now_ms);
+                aeron_counter_set_release(conductor->heartbeat_timestamp.addr, now_ms);
                 conductor->time_of_last_keepalive_ns = now_ns;
             }
         }
@@ -487,7 +513,7 @@ int aeron_client_conductor_check_liveness(aeron_client_conductor_t *conductor, l
                 return -1;
             }
 
-            aeron_counter_set_ordered(conductor->heartbeat_timestamp.addr, now_ms);
+            aeron_counter_set_release(conductor->heartbeat_timestamp.addr, now_ms);
             conductor->time_of_last_keepalive_ns = now_ns;
         }
 
@@ -505,9 +531,10 @@ int aeron_client_conductor_check_lingering_resources(aeron_client_conductor_t *c
      * Currently, only images are lingered and only until refcnt is 0. Even in the case of client timeout,
      * etc. we let the application call aeron_close to clean up and shutdown the thread, etc.
      */
-    for (size_t i = 0, size = conductor->lingering_resources.length, last_index = size - 1; i < size; i++)
+    for (size_t size = conductor->lingering_resources.length, last_index = size - 1, i = size; i > 0; i--)
     {
-        aeron_client_managed_resource_t *resource = &conductor->lingering_resources.array[i];
+        size_t index = i - 1;
+        aeron_client_managed_resource_t *resource = &conductor->lingering_resources.array[index];
 
         if (AERON_CLIENT_TYPE_IMAGE == resource->type)
         {
@@ -518,13 +545,14 @@ int aeron_client_conductor_check_lingering_resources(aeron_client_conductor_t *c
                 if (!aeron_image_is_in_use_by_subscription(
                     image, aeron_subscription_last_image_list_change_number(image->subscription)))
                 {
+                    aeron_client_conductor_subscription_prune_image_lists(image->subscription);
                     aeron_image_decr_refcnt(image);
                     image->subscription = NULL;
                     image->removal_change_number = INT64_MIN;
                 }
             }
 
-            if (aeron_image_refcnt_volatile(image) <= 0)
+            if (aeron_image_refcnt_acquire(image) <= 0)
             {
                 aeron_client_conductor_release_log_buffer(conductor, image->log_buffer);
                 aeron_image_delete(image);
@@ -532,9 +560,10 @@ int aeron_client_conductor_check_lingering_resources(aeron_client_conductor_t *c
                 aeron_array_fast_unordered_remove(
                     (uint8_t *)conductor->lingering_resources.array,
                     sizeof(aeron_client_managed_resource_t),
-                    i,
+                    index,
                     last_index);
                 conductor->lingering_resources.length--;
+                last_index--;
                 work_count += 1;
             }
         }
@@ -547,18 +576,20 @@ int aeron_client_conductor_check_registering_resources(aeron_client_conductor_t 
 {
     int work_count = 0;
 
-    for (size_t i = 0, size = conductor->registering_resources.length, last_index = size - 1; i < size; i++)
+    for (size_t size = conductor->registering_resources.length, last_index = size - 1, i = size; i > 0; i--)
     {
-        aeron_client_registering_resource_t *resource = conductor->registering_resources.array[i].resource;
+        size_t index = i - 1;
+        aeron_client_registering_resource_t *resource = conductor->registering_resources.array[index].resource;
 
         if (now_ns > resource->registration_deadline_ns)
         {
             aeron_array_fast_unordered_remove(
                 (uint8_t *)conductor->registering_resources.array,
                 sizeof(aeron_client_registering_resource_entry_t),
-                i,
+                index,
                 last_index);
             conductor->registering_resources.length--;
+            last_index--;
 
             AERON_SET_RELEASE(resource->registration_status, AERON_CLIENT_TIMEOUT_MEDIA_DRIVER);
 
@@ -677,6 +708,7 @@ void aeron_client_conductor_delete_resource(void *clientd, int64_t key, void *va
 
         case AERON_CLIENT_TYPE_LOGBUFFER:
         case AERON_CLIENT_TYPE_DESTINATION:
+        case AERON_CLIENT_TYPE_NEXT_AVAILABLE_SESSION_ID:
             break;
     }
 }
@@ -705,6 +737,7 @@ void aeron_client_conductor_on_close(aeron_client_conductor_t *conductor)
         aeron_client_conductor_delete_lingering_resource(&conductor->lingering_resources.array[i]);
     }
 
+    aeron_client_conductor_on_cmd_client_close(conductor);
     aeron_broadcast_receiver_close(&conductor->to_client_buffer);
 
     aeron_int64_to_ptr_hash_map_delete(&conductor->log_buffer_by_id_map);
@@ -719,7 +752,7 @@ void aeron_client_conductor_on_close(aeron_client_conductor_t *conductor)
 
 void aeron_client_conductor_force_close_image(void *clientd, const uint8_t *key, size_t key_len, void *value)
 {
-    aeron_image_force_close((aeron_image_t *)value);
+    aeron_image_close((aeron_image_t *)value);
 }
 
 void aeron_client_conductor_force_close_resource(void *clientd, int64_t key, void *value)
@@ -745,11 +778,12 @@ void aeron_client_conductor_force_close_resource(void *clientd, int64_t key, voi
             break;
 
         case AERON_CLIENT_TYPE_IMAGE:
-            aeron_image_force_close((aeron_image_t *)value);
+            aeron_image_close((aeron_image_t *)value);
             break;
 
         case AERON_CLIENT_TYPE_LOGBUFFER:
         case AERON_CLIENT_TYPE_DESTINATION:
+        case AERON_CLIENT_TYPE_NEXT_AVAILABLE_SESSION_ID:
             break;
     }
 }
@@ -801,10 +835,7 @@ int aeron_client_conductor_linger_or_delete_all_images(
     for (size_t i = 0; i < current_image_list->length; i++)
     {
         aeron_image_t *image = current_image_list->array[i];
-        int64_t refcnt;
-
-        aeron_image_decr_refcnt(image);
-        refcnt = aeron_image_refcnt_volatile(image);
+        int64_t refcnt = aeron_image_decr_refcnt(image);
 
         aeron_array_to_ptr_hash_map_remove(
             &conductor->image_by_key_map,
@@ -813,6 +844,11 @@ int aeron_client_conductor_linger_or_delete_all_images(
 
         if (refcnt <= 0)
         {
+            if (NULL != subscription->on_unavailable_image)
+            {
+                subscription->on_unavailable_image(subscription->on_unavailable_image_clientd, subscription, image);
+            }
+
             aeron_client_conductor_release_log_buffer(conductor, image->log_buffer);
             aeron_image_delete(image);
         }
@@ -1134,8 +1170,7 @@ void aeron_client_conductor_on_cmd_close_counter(void *clientd, void *item)
 
     if (NULL != aeron_int64_to_ptr_hash_map_remove(&conductor->resource_by_id_map, counter->registration_id))
     {
-        if (aeron_client_conductor_offer_remove_command(
-            conductor, counter->registration_id, AERON_COMMAND_REMOVE_COUNTER) < 0)
+        if (aeron_client_conductor_offer_remove_counter_command(conductor, counter->registration_id) < 0)
         {
             return;
         }
@@ -1239,6 +1274,7 @@ static int aeron_client_conductor_get_async_registration_id(
         case AERON_CLIENT_TYPE_LOGBUFFER:
         case AERON_CLIENT_TYPE_COUNTER:
         case AERON_CLIENT_TYPE_DESTINATION:
+        case AERON_CLIENT_TYPE_NEXT_AVAILABLE_SESSION_ID:
         {
             char err_buffer[AERON_ERROR_MAX_TOTAL_LENGTH];
             snprintf(
@@ -1442,6 +1478,7 @@ void aeron_client_conductor_on_cmd_handler(void *clientd, void *item)
                         i,
                         last_index);
                     conductor->available_counter_handlers.length--;
+                    break;
                 }
             }
             break;
@@ -1476,6 +1513,7 @@ void aeron_client_conductor_on_cmd_handler(void *clientd, void *item)
                         i,
                         last_index);
                     conductor->unavailable_counter_handlers.length--;
+                    break;
                 }
             }
             break;
@@ -1508,6 +1546,7 @@ void aeron_client_conductor_on_cmd_handler(void *clientd, void *item)
                         i,
                         last_index);
                     conductor->close_handlers.length--;
+                    break;
                 }
             }
             break;
@@ -1596,8 +1635,7 @@ int aeron_client_conductor_async_close_publication(
     publication->on_close_complete = on_close_complete;
     publication->on_close_complete_clientd = on_close_complete_clientd;
 
-    if (aeron_client_conductor_offer_remove_command(
-        conductor, publication->registration_id, AERON_COMMAND_REMOVE_PUBLICATION) < 0)
+    if (aeron_client_conductor_offer_remove_publication_command(conductor, publication->registration_id, false) < 0)
     {
         return -1;
     }
@@ -1681,8 +1719,8 @@ int aeron_client_conductor_async_close_exclusive_publication(
     publication->on_close_complete = on_close_complete;
     publication->on_close_complete_clientd = on_close_complete_clientd;
 
-    if (aeron_client_conductor_offer_remove_command(
-        conductor, publication->registration_id, AERON_COMMAND_REMOVE_PUBLICATION) < 0)
+    if (aeron_client_conductor_offer_remove_publication_command(
+        conductor, publication->registration_id, publication->revoke_on_close) < 0)
     {
         return -1;
     }
@@ -1774,8 +1812,7 @@ int aeron_client_conductor_async_close_subscription(
     subscription->on_close_complete = on_close_complete;
     subscription->on_close_complete_clientd = on_close_complete_clientd;
 
-    if (aeron_client_conductor_offer_remove_command(
-        conductor, subscription->registration_id, AERON_COMMAND_REMOVE_SUBSCRIPTION) < 0)
+    if (aeron_client_conductor_offer_remove_subscription_command(conductor, subscription->registration_id) < 0)
     {
         return -1;
     }
@@ -2207,6 +2244,105 @@ int aeron_client_conductor_async_remove_subscription_destination(
         async, &resource, uri, conductor, aeron_client_conductor_on_cmd_remove_rcv_destination);
 }
 
+static void aeron_client_conductor_ond_cmd_get_next_available_session_id(void *clientd, void *item)
+{
+    aeron_client_conductor_t *conductor = (aeron_client_conductor_t *)clientd;
+    aeron_async_get_next_available_session_id_t *async = (aeron_async_get_next_available_session_id_t *)item;
+
+    const size_t command_length = sizeof(aeron_get_next_available_session_id_command_t);
+    int ensure_capacity_result = 0, rb_offer_fail_count = 0;
+
+    int32_t offset;
+    while ((offset = aeron_mpsc_rb_try_claim(
+        &conductor->to_driver_buffer,
+        AERON_COMMAND_GET_NEXT_AVAILABLE_SESSION_ID,
+        command_length)) < 0)
+    {
+        if (++rb_offer_fail_count > AERON_CLIENT_COMMAND_RB_FAIL_THRESHOLD)
+        {
+            char err_buffer[AERON_ERROR_MAX_TOTAL_LENGTH];
+
+            snprintf(
+                err_buffer, sizeof(err_buffer) - 1, "GET_NEXT_AVAILABLE_SESSION_ID command could not be sent (%s:%d)", __FILE__, __LINE__);
+            conductor->error_handler(conductor->error_handler_clientd, AERON_CLIENT_ERROR_BUFFER_FULL, err_buffer);
+            return;
+        }
+
+        sched_yield();
+    }
+
+    uint8_t *ptr = (conductor->to_driver_buffer.buffer + offset);
+    aeron_get_next_available_session_id_command_t *command = (aeron_get_next_available_session_id_command_t *)ptr;
+    command->correlated.correlation_id = async->registration_id;
+    command->correlated.client_id = conductor->client_id;
+    command->stream_id = async->stream_id;
+
+    aeron_mpsc_rb_commit(&conductor->to_driver_buffer, offset);
+
+    AERON_ARRAY_ENSURE_CAPACITY(
+        ensure_capacity_result, conductor->registering_resources, aeron_client_registering_resource_entry_t);
+    if (ensure_capacity_result < 0)
+    {
+        char err_buffer[AERON_ERROR_MAX_TOTAL_LENGTH];
+
+        snprintf(err_buffer, sizeof(err_buffer) - 1, "GET_NEXT_AVAILABLE_SESSION_ID registering_resources: %s", aeron_errmsg());
+        conductor->error_handler(conductor->error_handler_clientd, aeron_errcode(), err_buffer);
+        return;
+    }
+
+    conductor->registering_resources.array[conductor->registering_resources.length++].resource = async;
+    async->registration_deadline_ns = (long long)(conductor->nano_clock() + conductor->driver_timeout_ns);
+}
+
+int aeron_client_conductor_async_get_next_available_session_id(
+    aeron_async_get_next_available_session_id_t **async,
+    aeron_client_conductor_t *conductor,
+    int32_t stream_id)
+{
+    aeron_async_get_next_available_session_id_t *cmd = NULL;
+
+    *async = NULL;
+
+    if (aeron_alloc((void **)&cmd, sizeof(aeron_async_get_next_available_session_id_t)) < 0)
+    {
+        AERON_APPEND_ERR("%s", "Unable to allocate aeron_async_get_next_available_session_id_t");
+        return -1;
+    }
+
+    cmd->command_base.func = aeron_client_conductor_ond_cmd_get_next_available_session_id;
+    cmd->command_base.item = NULL;
+    cmd->error_message = NULL;
+    cmd->stream_id = stream_id;
+    cmd->registration_id = aeron_mpsc_rb_next_correlation_id(&conductor->to_driver_buffer);
+    cmd->registration_status = AERON_CLIENT_AWAITING_MEDIA_DRIVER;
+    cmd->type = AERON_CLIENT_TYPE_NEXT_AVAILABLE_SESSION_ID;
+
+    if (conductor->control_protocol_version >= aeron_semantic_version_compose(1, 0, 0))
+    {
+        if (conductor->invoker_mode)
+        {
+            aeron_client_conductor_ond_cmd_get_next_available_session_id(conductor, cmd);
+        }
+        else
+        {
+            if (aeron_client_conductor_command_offer(conductor->command_queue, cmd) < 0)
+            {
+                aeron_free(cmd);
+                return -1;
+            }
+        }
+    }
+    else
+    {
+        cmd->resource.next_session_id = aeron_randomised_int32();
+        cmd->registration_status = AERON_CLIENT_REGISTERED_MEDIA_DRIVER;
+    }
+
+    *async = cmd;
+
+    return 0;
+}
+
 int aeron_client_conductor_async_handler(aeron_client_conductor_t *conductor, aeron_client_handler_cmd_t *cmd)
 {
     cmd->command_base.func = aeron_client_conductor_on_cmd_handler;
@@ -2298,7 +2434,8 @@ int aeron_client_conductor_release_log_buffer(aeron_client_conductor_t *conducto
 {
     if (--log_buffer->refcnt <= 0)
     {
-        aeron_int64_to_ptr_hash_map_remove(&conductor->log_buffer_by_id_map, log_buffer->correlation_id);
+        int64_t correlationId = log_buffer->correlation_id;
+        aeron_int64_to_ptr_hash_map_remove(&conductor->log_buffer_by_id_map, correlationId);
 
         aeron_log_buffer_delete(log_buffer);
     }
@@ -2890,6 +3027,32 @@ int aeron_client_conductor_on_static_counter(aeron_client_conductor_t *conductor
     return 0;
 }
 
+int aeron_client_conductor_on_next_available_session_id(
+    aeron_client_conductor_t *conductor, aeron_next_available_session_id_response_t *response)
+{
+    for (size_t i = 0, size = conductor->registering_resources.length, last_index = size - 1; i < size; i++)
+    {
+        aeron_client_registering_resource_t *resource = conductor->registering_resources.array[i].resource;
+
+        if (response->correlation_id == resource->registration_id)
+        {
+            resource->resource.next_session_id = response->next_session_id;
+
+            aeron_array_fast_unordered_remove(
+                (uint8_t *)conductor->registering_resources.array,
+                sizeof(aeron_client_registering_resource_entry_t),
+                i,
+                last_index);
+            conductor->registering_resources.length--;
+
+            AERON_SET_RELEASE(resource->registration_status, AERON_CLIENT_REGISTERED_MEDIA_DRIVER);
+            break;
+        }
+    }
+
+    return 0;
+}
+
 int aeron_client_conductor_on_client_timeout(aeron_client_conductor_t *conductor, aeron_client_timeout_t *response)
 {
     if (response->client_id == conductor->client_id)
@@ -2905,14 +3068,48 @@ int aeron_client_conductor_on_client_timeout(aeron_client_conductor_t *conductor
     return 0;
 }
 
-int aeron_client_conductor_offer_remove_command(
-    aeron_client_conductor_t *conductor, int64_t registration_id, int32_t command_type)
+int aeron_client_conductor_offer_remove_counter_command(
+    aeron_client_conductor_t *conductor, int64_t registration_id)
 {
     int rb_offer_fail_count = 0;
 
     int32_t offset;
     while ((offset = aeron_mpsc_rb_try_claim(
-        &conductor->to_driver_buffer, command_type, sizeof(aeron_remove_command_t))) < 0)
+        &conductor->to_driver_buffer, AERON_COMMAND_REMOVE_COUNTER, sizeof(aeron_remove_counter_command_t))) < 0)
+    {
+        if (++rb_offer_fail_count > AERON_CLIENT_COMMAND_RB_FAIL_THRESHOLD)
+        {
+            char err_buffer[AERON_ERROR_MAX_TOTAL_LENGTH];
+
+            snprintf(err_buffer, sizeof(err_buffer) - 1, "remove counter command could not be sent (%s:%d)",
+                __FILE__, __LINE__);
+            conductor->error_handler(conductor->error_handler_clientd, AERON_CLIENT_ERROR_BUFFER_FULL, err_buffer);
+            AERON_SET_ERR(AERON_CLIENT_ERROR_BUFFER_FULL, "%s", err_buffer);
+            return -1;
+        }
+
+        sched_yield();
+    }
+
+    aeron_remove_counter_command_t *command = (aeron_remove_counter_command_t *)(conductor->to_driver_buffer.buffer + offset);
+
+    command->correlated.correlation_id = aeron_mpsc_rb_next_correlation_id(&conductor->to_driver_buffer);
+    command->correlated.client_id = conductor->client_id;
+    command->registration_id = registration_id;
+
+    aeron_mpsc_rb_commit(&conductor->to_driver_buffer, offset);
+
+    return 0;
+}
+
+int aeron_client_conductor_offer_remove_publication_command(
+    aeron_client_conductor_t *conductor, int64_t registration_id, bool revoke)
+{
+    int rb_offer_fail_count = 0;
+
+    int32_t offset;
+    while ((offset = aeron_mpsc_rb_try_claim(
+        &conductor->to_driver_buffer, AERON_COMMAND_REMOVE_PUBLICATION, sizeof(aeron_remove_publication_command_t))) < 0)
     {
         if (++rb_offer_fail_count > AERON_CLIENT_COMMAND_RB_FAIL_THRESHOLD)
         {
@@ -2928,7 +3125,42 @@ int aeron_client_conductor_offer_remove_command(
         sched_yield();
     }
 
-    aeron_remove_command_t *command = (aeron_remove_command_t *)(conductor->to_driver_buffer.buffer + offset);
+    aeron_remove_publication_command_t *command = (aeron_remove_publication_command_t *)(conductor->to_driver_buffer.buffer + offset);
+
+    command->correlated.correlation_id = aeron_mpsc_rb_next_correlation_id(&conductor->to_driver_buffer);
+    command->correlated.client_id = conductor->client_id;
+    command->registration_id = registration_id;
+    command->flags = revoke ? AERON_COMMAND_REMOVE_PUBLICATION_FLAG_REVOKE : 0;
+
+    aeron_mpsc_rb_commit(&conductor->to_driver_buffer, offset);
+
+    return 0;
+}
+
+int aeron_client_conductor_offer_remove_subscription_command(
+    aeron_client_conductor_t *conductor, int64_t registration_id)
+{
+    int rb_offer_fail_count = 0;
+
+    int32_t offset;
+    while ((offset = aeron_mpsc_rb_try_claim(
+        &conductor->to_driver_buffer, AERON_COMMAND_REMOVE_SUBSCRIPTION, sizeof(aeron_remove_subscription_command_t))) < 0)
+    {
+        if (++rb_offer_fail_count > AERON_CLIENT_COMMAND_RB_FAIL_THRESHOLD)
+        {
+            char err_buffer[AERON_ERROR_MAX_TOTAL_LENGTH];
+
+            snprintf(err_buffer, sizeof(err_buffer) - 1, "remove command could not be sent (%s:%d)",
+                __FILE__, __LINE__);
+            conductor->error_handler(conductor->error_handler_clientd, AERON_CLIENT_ERROR_BUFFER_FULL, err_buffer);
+            AERON_SET_ERR(AERON_CLIENT_ERROR_BUFFER_FULL, "%s", err_buffer);
+            return -1;
+        }
+
+        sched_yield();
+    }
+
+    aeron_remove_subscription_command_t *command = (aeron_remove_subscription_command_t *)(conductor->to_driver_buffer.buffer + offset);
 
     command->correlated.correlation_id = aeron_mpsc_rb_next_correlation_id(&conductor->to_driver_buffer);
     command->correlated.client_id = conductor->client_id;
@@ -3020,6 +3252,33 @@ int aeron_client_conductor_reject_image(
 
     aeron_mpsc_rb_commit(&conductor->to_driver_buffer, offset);
 
+    return 0;
+}
+
+int aeron_client_conductor_on_cmd_client_close(aeron_client_conductor_t *conductor)
+{
+    int32_t command_length = sizeof(aeron_correlated_command_t);
+    int32_t offset;
+    int rb_offer_fail_count = 0;
+
+    while ((offset = aeron_mpsc_rb_try_claim(&conductor->to_driver_buffer, AERON_COMMAND_CLIENT_CLOSE, command_length)) < 0)
+    {
+        if (++rb_offer_fail_count > AERON_CLIENT_COMMAND_RB_FAIL_THRESHOLD)
+        {
+            const char *err_buffer = "client_close command could not be sent";
+            conductor->error_handler(conductor->error_handler_clientd, AERON_CLIENT_ERROR_BUFFER_FULL, err_buffer);
+            AERON_SET_ERR(AERON_CLIENT_ERROR_BUFFER_FULL, "%s", err_buffer);
+            return -1;
+        }
+        sched_yield();
+    }
+
+    uint8_t *ptr = conductor->to_driver_buffer.buffer + offset;
+    aeron_correlated_command_t *command = (aeron_correlated_command_t *)ptr;
+    command->client_id = conductor->client_id;
+    command->correlation_id = AERON_NULL_VALUE;
+
+    aeron_mpsc_rb_commit(&conductor->to_driver_buffer, offset);
     return 0;
 }
 

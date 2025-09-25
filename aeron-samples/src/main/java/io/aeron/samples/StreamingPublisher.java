@@ -15,7 +15,14 @@
  */
 package io.aeron.samples;
 
-import static org.agrona.BitUtil.SIZE_OF_LONG;
+import io.aeron.Aeron;
+import io.aeron.Publication;
+import io.aeron.driver.MediaDriver;
+import org.agrona.BitUtil;
+import org.agrona.BufferUtil;
+import org.agrona.concurrent.IdleStrategy;
+import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.console.ContinueBarrier;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -23,15 +30,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.function.IntSupplier;
 
-import io.aeron.Aeron;
-import io.aeron.Publication;
-import io.aeron.driver.MediaDriver;
-import org.agrona.BitUtil;
-import org.agrona.BufferUtil;
-import org.agrona.CloseHelper;
-import org.agrona.concurrent.IdleStrategy;
-import org.agrona.concurrent.UnsafeBuffer;
-import org.agrona.console.ContinueBarrier;
+import static org.agrona.BitUtil.SIZE_OF_LONG;
 
 /**
  * Publisher that sends a given number of messages at a given length as fast as possible.
@@ -64,77 +63,78 @@ public class StreamingPublisher
             throw new IllegalArgumentException("Message length must be at least " + SIZE_OF_LONG + " bytes");
         }
 
-        final MediaDriver driver = EMBEDDED_MEDIA_DRIVER ? MediaDriver.launchEmbedded() : null;
-        final Aeron.Context context = new Aeron.Context();
-
-        if (EMBEDDED_MEDIA_DRIVER)
+        try (MediaDriver driver = EMBEDDED_MEDIA_DRIVER ? MediaDriver.launchEmbedded() : null)
         {
-            context.aeronDirectoryName(driver.aeronDirectoryName());
-        }
+            final Aeron.Context context = new Aeron.Context();
 
-        final RateReporter reporter = new RateReporter(TimeUnit.SECONDS.toNanos(1), StreamingPublisher::printRate);
-        final ExecutorService executor = Executors.newFixedThreadPool(1);
-
-        executor.execute(reporter);
-
-        // Connect to media driver and add publication to send messages on the configured channel and stream ID.
-        // The Aeron and Publication classes implement AutoCloseable, and will automatically
-        // clean up resources when this try block is finished.
-        try (Aeron aeron = Aeron.connect(context);
-            Publication publication = aeron.addPublication(CHANNEL, STREAM_ID))
-        {
-            final ContinueBarrier barrier = new ContinueBarrier("Execute again?");
-            final IdleStrategy idleStrategy = SampleConfiguration.newIdleStrategy();
-
-            do
+            if (EMBEDDED_MEDIA_DRIVER)
             {
-                printingActive = true;
+                context.aeronDirectoryName(driver.aeronDirectoryName());
+            }
 
-                System.out.format(
-                    "%nStreaming %,d messages of%s size %d bytes to %s on stream id %d%n",
-                    NUMBER_OF_MESSAGES,
-                    RANDOM_MESSAGE_LENGTH ? " random" : "",
-                    MESSAGE_LENGTH,
-                    CHANNEL,
-                    STREAM_ID);
+            final RateReporter reporter = new RateReporter(TimeUnit.SECONDS.toNanos(1), StreamingPublisher::printRate);
+            final ExecutorService executor = Executors.newFixedThreadPool(1);
 
-                long backPressureCount = 0;
+            executor.execute(reporter);
 
-                for (long i = 0; i < NUMBER_OF_MESSAGES; i++)
+            // Connect to media driver and add publication to send messages on the configured channel and stream ID.
+            // The Aeron and Publication classes implement AutoCloseable, and will automatically
+            // clean up resources when this try block is finished.
+            try (Aeron aeron = Aeron.connect(context);
+                Publication publication = aeron.addPublication(CHANNEL, STREAM_ID))
+            {
+                final ContinueBarrier barrier = new ContinueBarrier("Execute again?");
+                final IdleStrategy idleStrategy = SampleConfiguration.newIdleStrategy();
+
+                do
                 {
-                    final int length = LENGTH_GENERATOR.getAsInt();
+                    printingActive = true;
 
-                    OFFER_BUFFER.putLong(0, i);
-                    idleStrategy.reset();
-                    while (publication.offer(OFFER_BUFFER, 0, length, null) < 0L)
+                    System.out.format(
+                        "%nStreaming %,d messages of%s size %d bytes to %s on stream id %d%n",
+                        NUMBER_OF_MESSAGES,
+                        RANDOM_MESSAGE_LENGTH ? " random" : "",
+                        MESSAGE_LENGTH,
+                        CHANNEL,
+                        STREAM_ID);
+
+                    long backPressureCount = 0;
+
+                    for (long i = 0; i < NUMBER_OF_MESSAGES; i++)
                     {
-                        // The offer failed, which is usually due to the publication
-                        // being temporarily blocked. Retry the offer after a short
-                        // spin/yield/sleep, depending on the chosen IdleStrategy.
-                        backPressureCount++;
-                        idleStrategy.idle();
+                        final int length = LENGTH_GENERATOR.getAsInt();
+
+                        OFFER_BUFFER.putLong(0, i);
+                        idleStrategy.reset();
+                        while (publication.offer(OFFER_BUFFER, 0, length, null) < 0L)
+                        {
+                            // The offer failed, which is usually due to the publication
+                            // being temporarily blocked. Retry the offer after a short
+                            // spin/yield/sleep, depending on the chosen IdleStrategy.
+                            backPressureCount++;
+                            idleStrategy.idle();
+                        }
+
+                        reporter.onMessage(length);
                     }
 
-                    reporter.onMessage(length);
+                    System.out.println(
+                        "Done streaming. Back pressure ratio " + ((double)backPressureCount / NUMBER_OF_MESSAGES));
+
+                    if (LINGER_TIMEOUT_MS > 0)
+                    {
+                        System.out.println("Lingering for " + LINGER_TIMEOUT_MS + " milliseconds...");
+                        Thread.sleep(LINGER_TIMEOUT_MS);
+                    }
+
+                    printingActive = false;
                 }
-
-                System.out.println(
-                    "Done streaming. Back pressure ratio " + ((double)backPressureCount / NUMBER_OF_MESSAGES));
-
-                if (LINGER_TIMEOUT_MS > 0)
-                {
-                    System.out.println("Lingering for " + LINGER_TIMEOUT_MS + " milliseconds...");
-                    Thread.sleep(LINGER_TIMEOUT_MS);
-                }
-
-                printingActive = false;
+                while (barrier.await());
             }
-            while (barrier.await());
-        }
 
-        reporter.halt();
-        executor.shutdown();
-        CloseHelper.close(driver);
+            reporter.halt();
+            executor.shutdown();
+        }
     }
 
     private static void printRate(

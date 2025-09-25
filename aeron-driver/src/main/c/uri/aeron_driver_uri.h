@@ -21,6 +21,8 @@
 #include "aeron_driver_common.h"
 #include "aeronmd.h"
 
+#define AERON_URI_PROTOTYPE_VALUE_CORRELATION_ID (-2)
+
 typedef struct aeron_driver_uri_publication_params_stct
 {
     bool has_position;
@@ -36,6 +38,7 @@ typedef struct aeron_driver_uri_publication_params_stct
     int32_t term_id;
     uint64_t linger_timeout_ns;
     uint64_t untethered_window_limit_timeout_ns;
+    int64_t untethered_linger_timeout_ns;
     uint64_t untethered_resting_timeout_ns;
     bool has_session_id;
     int32_t session_id;
@@ -55,11 +58,14 @@ typedef struct aeron_driver_uri_subscription_params_stct
     bool is_sparse;
     bool is_tether;
     bool is_rejoin;
-    aeron_inferable_boolean_t group;
     bool has_session_id;
+    bool is_response;
+    aeron_inferable_boolean_t group;
     int32_t session_id;
     size_t initial_window_length;
-    bool is_response;
+    uint64_t untethered_window_limit_timeout_ns;
+    int64_t untethered_linger_timeout_ns;
+    uint64_t untethered_resting_timeout_ns;
 }
 aeron_driver_uri_subscription_params_t;
 

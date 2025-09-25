@@ -15,19 +15,13 @@
  */
 package io.aeron.driver;
 
-import io.aeron.Aeron;
 import io.aeron.logbuffer.LogBufferDescriptor;
 import io.aeron.test.SystemTestWatcher;
 import io.aeron.test.driver.TestMediaDriver;
 import org.agrona.CloseHelper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
-
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.containsString;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class ExperimentalDriverFeaturesTest
 {
@@ -41,8 +35,8 @@ public class ExperimentalDriverFeaturesTest
     {
         final MediaDriver.Context context = new MediaDriver.Context()
             .publicationTermBufferLength(LogBufferDescriptor.TERM_MIN_LENGTH)
-            .threadingMode(ThreadingMode.SHARED);
-        context.enableExperimentalFeatures(false);
+            .threadingMode(ThreadingMode.SHARED)
+            .dirDeleteOnShutdown(true);
 
         driver = TestMediaDriver.launch(context, watcher);
         watcher.dataCollector().add(driver.context().aeronDirectory());
@@ -53,33 +47,5 @@ public class ExperimentalDriverFeaturesTest
     void tearDown()
     {
         CloseHelper.quietClose(driver);
-    }
-
-    @Test
-    void shouldFailToCreateResponsePublicationIfExperimentalFeaturesAreDisabled()
-    {
-        try (Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(driver.aeronDirectoryName())))
-        {
-            final Exception ex1 = assertThrows(Exception.class, () -> aeron.addPublication(
-                "aeron:udp?endpoint=localhost:10000|response-correlation-id=10", 10001));
-            assertThat(ex1.getMessage(), containsString("experimental feature"));
-            final Exception ex2 = assertThrows(Exception.class, () -> aeron.addPublication(
-                "aeron:udp?endpoint=localhost:10000|control-mode=response", 10001));
-            assertThat(ex2.getMessage(), containsString("experimental feature"));
-        }
-    }
-
-    @Test
-    void shouldFailToCreateResponseSubscriptionIfExperimentalFeaturesAreDisabled()
-    {
-        try (Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(driver.aeronDirectoryName())))
-        {
-            final Exception ex1 = assertThrows(Exception.class, () -> aeron.addSubscription(
-                "aeron:udp?endpoint=localhost:10000|response-correlation-id=10", 10001));
-            assertThat(ex1.getMessage(), containsString("experimental feature"));
-            final Exception ex2 = assertThrows(Exception.class, () -> aeron.addSubscription(
-                "aeron:udp?endpoint=localhost:10000|control-mode=response", 10001));
-            assertThat(ex2.getMessage(), containsString("experimental feature"));
-        }
     }
 }

@@ -64,12 +64,15 @@ public:
      * Create an Aeron instance and connect to the media driver.
      * <p>
      * Threads required for interacting with the media driver are created and managed within the Aeron instance.
+     * <p>
+     * Note that the ownership of the Context object is passed over to the Aeron instance and the context object is
+     * invalid after calling this constructor.
      *
      * @param context for configuration of the client.
      */
     explicit Aeron(Context &context) :
-        m_context(std::move(context.conclude())),
-        m_aeron(Aeron::init_aeron(m_context)),
+        m_context(context.conclude()),
+        m_aeron(Aeron::init_aeron(m_context, &m_aeron_context)),
         m_countersReader(aeron_counters_reader(m_aeron)),
         m_clientConductor(m_aeron),
         m_conductorInvoker(m_clientConductor, m_context.m_exceptionHandler)
@@ -78,7 +81,7 @@ public:
     }
 
     explicit Aeron(aeron_t *aeron) :
-        m_context(aeron_context(aeron)),
+        m_aeron_context(aeron_context(aeron)),
         m_aeron(aeron),
         m_countersReader(aeron_counters_reader(m_aeron)),
         m_clientConductor(m_aeron),
@@ -95,6 +98,8 @@ public:
         m_availableCounterHandlers.clear();
         m_unavailableCounterHandlers.clear();
         m_closeClientHandlers.clear();
+
+        aeron_context_close(m_aeron_context);
     }
 
     /**
@@ -248,6 +253,20 @@ public:
     }
 
     /**
+     * Gets the registration id for addition of the publication. Note that using this after a call to poll the
+     * succeeds or errors is undefined behaviour. As the AsyncAddPublication may have been freed.
+     * <p>
+     * <em>Note:<em> The return value cannot be used to call `findPublication` method.
+     *
+     * @param addPublication used to check for completion.
+     * @return registration id for the publication.
+     */
+    inline std::int64_t addPublicationAsyncGetRegistrationId(AsyncAddPublication *addPublication)
+    {
+        return aeron_async_add_publication_get_registration_id(addPublication);
+    }
+
+    /**
      * Add an {@link ExclusivePublication} for publishing messages to subscribers from a single thread.
      *
      * @param channel  for sending the messages known to the media layer.
@@ -358,6 +377,20 @@ public:
         {
             return std::make_shared<ExclusivePublication>(m_aeron, publication);
         }
+    }
+
+    /**
+     * Gets the registration id for addition of the exclusive publication. Note that using this after a call to poll the
+     * succeeds or errors is undefined behaviour. As the AsyncAddExclusivePublication may have been freed.
+     * <p>
+     * <em>Note:<em> The return value cannot be used to call `findPublication` method.
+     *
+     * @param addPublication used to check for completion.
+     * @return registration id for the exclusive publication.
+     */
+    inline std::int64_t addExclusivePublicationAsyncGetRegistrationId(AsyncAddExclusivePublication *addPublication)
+    {
+        return aeron_async_add_exclusive_publication_get_registration_id(addPublication);
     }
 
     /**
@@ -530,6 +563,20 @@ public:
     }
 
     /**
+     * Gets the registration id for addition of the subscription. Note that using this after a call to poll the
+     * succeeds or errors is undefined behaviour. As the AsyncAddSubscription may have been freed.
+     * <p>
+     * <em>Note:<em> The return value cannot be used to call `findPublication` method.
+     *
+     * @param addSubscription used to check for completion.
+     * @return registration id for the subscription.
+     */
+    inline std::int64_t addSubscriptionAsyncGetRegistrationId(AsyncAddSubscription *addSubscription)
+    {
+        return aeron_async_add_subscription_get_registration_id(addSubscription->m_async);
+    }
+
+    /**
      * Generate the next correlation id that is unique for the connected Media Driver.
      *
      * This is useful generating correlation identifiers for pairing requests with responses in a clients own
@@ -667,6 +714,20 @@ public:
             aeron_counter_constants(counter, &counter_constants);
             return std::make_shared<Counter>(counter, m_countersReader, counter_constants.registration_id);
         }
+    }
+
+    /**
+     * Gets the registration id for addition of the counter. Note that using this after a call to poll the
+     * succeeds or errors is undefined behaviour. As the AsyncAddCounter may have been freed.
+     * <p>
+     * <em>Note:<em> The return value cannot be used to call `findPublication` method.
+     *
+     * @param addCounter used to check for completion.
+     * @return registration id for the counter.
+     */
+    inline std::int64_t addCounterAsyncGetRegistrationId(AsyncAddCounter *addCounter)
+    {
+        return aeron_async_add_counter_get_registration_id(addCounter);
     }
 
     /**
@@ -934,7 +995,7 @@ public:
      */
     inline bool usesAgentInvoker() const
     {
-        return aeron_context_get_use_conductor_agent_invoker(m_context.m_context);
+        return m_context.m_useConductorAgentInvoker;
     }
 
     /**
@@ -995,6 +1056,7 @@ public:
 
 private:
     Context m_context;
+    aeron_context_t *m_aeron_context;
     aeron_t *m_aeron = nullptr;
     CountersReader m_countersReader;
     std::unordered_map<std::int64_t, AsyncAddPublication *> m_pendingPublications;
@@ -1008,14 +1070,29 @@ private:
     ClientConductor m_clientConductor;
     AgentInvoker<ClientConductor> m_conductorInvoker;
 
-    static aeron_t *init_aeron(Context &context)
+    static aeron_t *init_aeron(Context &context, aeron_context_t **aeron_context)
     {
+        aeron_context_t *_context;
+        aeron_context_init(&_context);
+
         aeron_t *aeron;
-        context.attachCallbacksToContext();
-        if (aeron_init(&aeron, context.m_context) < 0)
+        try
         {
+            context.attachCallbacksToContext(_context);
+        }
+        catch (IllegalArgumentException &ex)
+        {
+            aeron_context_close(_context);
+            throw ex;
+        }
+
+        if (aeron_init(&aeron, _context) < 0)
+        {
+            aeron_context_close(_context);
             AERON_MAP_ERRNO_TO_SOURCED_EXCEPTION_AND_THROW;
         }
+
+        *aeron_context = _context;
 
         return aeron;
     }

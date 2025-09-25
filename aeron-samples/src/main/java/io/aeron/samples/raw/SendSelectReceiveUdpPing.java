@@ -20,7 +20,7 @@ import org.HdrHistogram.Histogram;
 import org.agrona.SystemUtil;
 import org.agrona.collections.MutableLong;
 import org.agrona.concurrent.HighResolutionTimer;
-import org.agrona.concurrent.SigInt;
+import org.agrona.concurrent.ShutdownSignalBarrier;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -40,8 +40,6 @@ import static org.agrona.BitUtil.SIZE_OF_LONG;
 
 /**
  * Benchmark used to calculate latency of underlying system.
- *
- * @see HackSelectReceiveSendUdpPong
  */
 public class SendSelectReceiveUdpPing
 {
@@ -51,6 +49,7 @@ public class SendSelectReceiveUdpPing
      * @param args passed to the process.
      * @throws IOException if an error occurs with the channel.
      */
+    @SuppressWarnings("try")
     public static void main(final String[] args) throws IOException
     {
         if (SystemUtil.isWindows())
@@ -102,15 +101,16 @@ public class SendSelectReceiveUdpPing
         receiveChannel.register(selector, OP_READ, handler);
 
         final AtomicBoolean running = new AtomicBoolean(true);
-        SigInt.register(() -> running.set(false));
-
-        while (running.get())
+        try (ShutdownSignalBarrier ignore = new ShutdownSignalBarrier(() -> running.set(false)))
         {
-            measureRoundTrip(histogram, sendAddress, buffer, sendChannel, selector, sequence, running);
+            while (running.get())
+            {
+                measureRoundTrip(histogram, sendAddress, buffer, sendChannel, selector, sequence, running);
 
-            histogram.reset();
-            System.gc();
-            LockSupport.parkNanos(1_000_000_000L);
+                histogram.reset();
+                System.gc();
+                LockSupport.parkNanos(1_000_000_000L);
+            }
         }
     }
 

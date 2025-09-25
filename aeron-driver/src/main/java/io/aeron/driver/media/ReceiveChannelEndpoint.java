@@ -272,7 +272,7 @@ public class ReceiveChannelEndpoint extends ReceiveChannelEndpointRhsPadding
             updateLocalSocketAddress(bindAddressAndPort);
         }
 
-        statusIndicator.setOrdered(ChannelEndpointStatus.ACTIVE);
+        statusIndicator.setRelease(ChannelEndpointStatus.ACTIVE);
     }
 
     /**
@@ -324,22 +324,7 @@ public class ReceiveChannelEndpoint extends ReceiveChannelEndpointRhsPadding
     {
         if (null == multiRcvDestination)
         {
-            if (conductorProxy.notConcurrent())
-            {
-                openDatagramChannel(statusIndicator);
-            }
-            else
-            {
-                try
-                {
-                    openDatagramChannel(statusIndicator);
-                }
-                catch (final Exception ex)
-                {
-                    conductorProxy.channelEndpointError(statusIndicator.id(), ex);
-                    throw ex;
-                }
-            }
+            openDatagramChannel(statusIndicator);
         }
     }
 
@@ -348,7 +333,7 @@ public class ReceiveChannelEndpoint extends ReceiveChannelEndpointRhsPadding
      */
     public void possibleTtlAsymmetryEncountered()
     {
-        possibleTtlAsymmetry.incrementOrdered();
+        possibleTtlAsymmetry.incrementRelease();
     }
 
     /**
@@ -1103,7 +1088,7 @@ public class ReceiveChannelEndpoint extends ReceiveChannelEndpointRhsPadding
         {
             LocalSocketAddressStatus.updateBindAddress(
                 localSocketAddressIndicator, bindAddressAndPort, context.countersMetaDataBuffer());
-            localSocketAddressIndicator.setOrdered(ChannelEndpointStatus.ACTIVE);
+            localSocketAddressIndicator.setRelease(ChannelEndpointStatus.ACTIVE);
         }
     }
 

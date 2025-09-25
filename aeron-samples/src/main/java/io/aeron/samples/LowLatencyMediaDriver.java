@@ -47,9 +47,10 @@ public class LowLatencyMediaDriver
             .receiverIdleStrategy(NoOpIdleStrategy.INSTANCE)
             .senderIdleStrategy(NoOpIdleStrategy.INSTANCE);
 
-        try (MediaDriver ignored = MediaDriver.launch(ctx))
+        try (ShutdownSignalBarrier barrier = new ShutdownSignalBarrier();
+            MediaDriver ignore = MediaDriver.launch(ctx.terminationHook(barrier::signalAll)))
         {
-            new ShutdownSignalBarrier().await();
+            barrier.await();
 
             System.out.println("Shutdown Driver...");
         }

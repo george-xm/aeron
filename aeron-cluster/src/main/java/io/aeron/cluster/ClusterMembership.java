@@ -45,17 +45,7 @@ public class ClusterMembership
     public String activeMembersStr = null;
 
     /**
-     * List of active cluster members encoded to a String.
-     */
-    public String passiveMembersStr = null;
-
-    /**
      * Current active members of a cluster.
      */
     public List<ClusterMember> activeMembers = null;
-
-    /**
-     * Current passive members of a cluster.
-     */
-    public List<ClusterMember> passiveMembers = null;
 }

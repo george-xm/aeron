@@ -43,7 +43,6 @@ final class BoundedLogAdapter implements ControlledFragmentHandler, AutoCloseabl
     private final SessionCloseEventDecoder closeEventDecoder = new SessionCloseEventDecoder();
     private final ClusterActionRequestDecoder actionRequestDecoder = new ClusterActionRequestDecoder();
     private final NewLeadershipTermEventDecoder newLeadershipTermEventDecoder = new NewLeadershipTermEventDecoder();
-    private final MembershipChangeEventDecoder membershipChangeEventDecoder = new MembershipChangeEventDecoder();
 
     BoundedLogAdapter(final ClusteredServiceAgent agent, final int fragmentLimit)
     {

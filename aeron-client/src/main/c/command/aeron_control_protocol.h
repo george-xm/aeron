@@ -18,6 +18,9 @@
 #define AERON_CONTROL_PROTOCOL_H
 
 #include <stdint.h>
+#define AERON_CONTROL_PROTOCOL_MAJOR_VERSION (1)
+#define AERON_CONTROL_PROTOCOL_MINOR_VERSION (0)
+#define AERON_CONTROL_PROTOCOL_PATCH_VERSION (0)
 
 #define AERON_COMMAND_ADD_PUBLICATION (0x01)
 #define AERON_COMMAND_REMOVE_PUBLICATION (0x02)
@@ -37,6 +40,7 @@
 #define AERON_COMMAND_ADD_STATIC_COUNTER (0x0F)
 #define AERON_COMMAND_REJECT_IMAGE (0x10)
 #define AERON_COMMAND_REMOVE_DESTINATION_BY_ID (0x11)
+#define AERON_COMMAND_GET_NEXT_AVAILABLE_SESSION_ID (0x12)
 
 #define AERON_RESPONSE_ON_ERROR (0x0F01)
 #define AERON_RESPONSE_ON_AVAILABLE_IMAGE (0x0F02)
@@ -50,6 +54,7 @@
 #define AERON_RESPONSE_ON_CLIENT_TIMEOUT (0x0F0A)
 #define AERON_RESPONSE_ON_STATIC_COUNTER (0x0F0B)
 #define AERON_RESPONSE_ON_PUBLICATION_ERROR (0x0F0C)
+#define AERON_RESPONSE_ON_NEXT_AVAILABLE_SESSION_ID (0x0F0D)
 
 /* error codes */
 #define AERON_ERROR_CODE_UNKNOWN_CODE_VALUE (-1)
@@ -68,6 +73,8 @@
 #define AERON_ERROR_CODE_STORAGE_SPACE (12)
 #define AERON_ERROR_CODE_IMAGE_REJECTED (13)
 #define AERON_ERROR_CODE_PUBLICATION_REVOKED (14)
+
+#define AERON_COMMAND_REMOVE_PUBLICATION_FLAG_REVOKE (0x1)
 
 #pragma pack(push)
 #pragma pack(4)
@@ -138,12 +145,27 @@ typedef struct aeron_error_response_stct
 }
 aeron_error_response_t;
 
-typedef struct aeron_remove_command_stct
+typedef struct aeron_remove_counter_command_stct
 {
     aeron_correlated_command_t correlated;
     int64_t registration_id;
 }
-aeron_remove_command_t;
+aeron_remove_counter_command_t;
+
+typedef struct aeron_remove_publication_command_stct
+{
+    aeron_correlated_command_t correlated;
+    int64_t registration_id;
+    uint64_t flags;
+}
+aeron_remove_publication_command_t;
+
+typedef struct aeron_remove_subscription_command_stct
+{
+    aeron_correlated_command_t correlated;
+    int64_t registration_id;
+}
+aeron_remove_subscription_command_t;
 
 typedef struct aeron_image_message_stct
 {
@@ -238,6 +260,20 @@ struct aeron_publication_error_stct
     uint8_t error_message[1];
 };
 typedef struct aeron_publication_error_stct aeron_publication_error_t;
+
+typedef struct aeron_get_next_available_session_id_command_stct
+{
+    aeron_correlated_command_t correlated;
+    int32_t stream_id;
+}
+aeron_get_next_available_session_id_command_t;
+
+typedef struct aeron_next_available_session_id_response_stct
+{
+    int64_t correlation_id;
+    int32_t next_session_id;
+}
+aeron_next_available_session_id_response_t;
 
 #pragma pack(pop)
 

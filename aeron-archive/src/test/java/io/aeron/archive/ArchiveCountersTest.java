@@ -144,7 +144,7 @@ class ArchiveCountersTest
         final int archiveIdLength = String.valueOf(archiveId).length();
 
         assertEquals(
-            ArchiveCounters.ARCHIVE_ID_LABEL_PREFIX.length() + archiveIdLength,
+            ArchiveCounters.ARCHIVE_ID_LABEL_SUFFIX.length() + archiveIdLength,
             ArchiveCounters.lengthOfArchiveIdLabel(archiveId));
     }
 
@@ -158,9 +158,9 @@ class ArchiveCountersTest
         final int length = ArchiveCounters.appendArchiveIdLabel(buffer, offset, archiveId);
 
         assertEquals(ArchiveCounters.lengthOfArchiveIdLabel(archiveId), length);
-        final int prefixLength = ArchiveCounters.ARCHIVE_ID_LABEL_PREFIX.length();
+        final int prefixLength = ArchiveCounters.ARCHIVE_ID_LABEL_SUFFIX.length();
         assertEquals(
-            ArchiveCounters.ARCHIVE_ID_LABEL_PREFIX,
+            ArchiveCounters.ARCHIVE_ID_LABEL_SUFFIX,
             buffer.getStringWithoutLengthAscii(offset, prefixLength));
         assertEquals(archiveId, buffer.parseLongAscii(offset + prefixLength, length - prefixLength));
     }

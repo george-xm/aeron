@@ -51,7 +51,7 @@ public class ReplayParams
         boundingLimitCounterId = Aeron.NULL_VALUE;
         fileIoMaxLength = Aeron.NULL_VALUE;
         position = AeronArchive.NULL_POSITION;
-        length = AeronArchive.NULL_LENGTH;
+        length = AeronArchive.REPLAY_ALL_AND_FOLLOW;
         replayToken = Aeron.NULL_VALUE;
         subscriptionRegistrationId = Aeron.NULL_VALUE;
         return this;
@@ -82,8 +82,13 @@ public class ReplayParams
     }
 
     /**
-     * The length of the recorded stream to replay. If set to {@link AeronArchive#NULL_POSITION} (the default) will
-     * replay a whole stream of unknown length. If set to {@link Long#MAX_VALUE} it will follow a live recording.
+     * The length of the recorded stream to replay. If set to {@link AeronArchive#REPLAY_ALL_AND_FOLLOW} (the default)
+     * it will replay a whole stream of unknown length and then continue to follow the replay if it is live. If set to
+     * {@link AeronArchive#REPLAY_ALL_AND_STOP} it will replay up the limit calculated when the replay request is
+     * received then stop the replay, thereby ending the stream.
+     * <p>
+     * {@link AeronArchive#REPLAY_ALL_AND_FOLLOW} retains the same behaviour as using {@link AeronArchive#NULL_LENGTH}
+     * or {@link Long#MAX_VALUE}.
      *
      * @param length of the recording to be replayed.
      * @return this for a fluent API.

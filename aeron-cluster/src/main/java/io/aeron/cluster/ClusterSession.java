@@ -15,20 +15,32 @@
  */
 package io.aeron.cluster;
 
-import io.aeron.*;
+import io.aeron.Aeron;
+import io.aeron.AeronCounters;
+import io.aeron.Counter;
+import io.aeron.Image;
+import io.aeron.Publication;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.cluster.client.ClusterEvent;
 import io.aeron.cluster.client.ClusterException;
 import io.aeron.cluster.codecs.CloseReason;
 import io.aeron.cluster.codecs.EventCode;
+import io.aeron.cluster.service.ClusterCounters;
 import io.aeron.exceptions.AeronException;
 import io.aeron.exceptions.RegistrationException;
 import io.aeron.logbuffer.BufferClaim;
-import org.agrona.*;
+import io.aeron.logbuffer.Header;
+import org.agrona.BitUtil;
+import org.agrona.CloseHelper;
+import org.agrona.DirectBuffer;
+import org.agrona.ErrorHandler;
+import org.agrona.MutableDirectBuffer;
 import org.agrona.collections.ArrayUtil;
 import org.agrona.concurrent.errors.DistinctErrorLog;
 
 import java.util.Arrays;
+
+import static io.aeron.Aeron.NULL_VALUE;
 
 final class ClusterSession implements ClusterClientSession
 {
@@ -36,11 +48,13 @@ final class ClusterSession implements ClusterClientSession
     static final int MAX_ENCODED_PRINCIPAL_LENGTH = 4 * 1024;
     static final int MAX_ENCODED_MEMBERSHIP_QUERY_LENGTH = 4 * 1024;
 
+    @SuppressWarnings("JavadocVariable")
     enum State
     {
         INIT, CONNECTING, CONNECTED, CHALLENGED, AUTHENTICATED, REJECTED, OPEN, CLOSING, INVALID, CLOSED
     }
 
+    @SuppressWarnings("JavadocVariable")
     enum Action
     {
         CLIENT, BACKUP, HEARTBEAT, STANDBY_SNAPSHOT
@@ -53,10 +67,14 @@ final class ClusterSession implements ClusterClientSession
     private long openedLogPosition = AeronArchive.NULL_POSITION;
     private long closedLogPosition = AeronArchive.NULL_POSITION;
     private transient long timeOfLastActivityNs;
-    private long responsePublicationId = Aeron.NULL_VALUE;
+    private transient long ingressImageCorrelationId = NULL_VALUE;
+    private long responsePublicationId = NULL_VALUE;
+    private long counterRegistrationId = NULL_VALUE;
     private final int responseStreamId;
     private final String responseChannel;
+    private final String sessionInfo;
     private Publication responsePublication;
+    private Counter counter;
     private State state;
     private String responseDetail = null;
     private EventCode eventCode = null;
@@ -65,24 +83,31 @@ final class ClusterSession implements ClusterClientSession
     private Action action = Action.CLIENT;
     private Object requestInput = null;
 
-    ClusterSession(final long sessionId, final int responseStreamId, final String responseChannel)
+    ClusterSession(
+        final long sessionId,
+        final int responseStreamId,
+        final String responseChannel,
+        final String sessionInfo)
     {
         this.id = sessionId;
         this.responseStreamId = responseStreamId;
         this.responseChannel = responseChannel;
+        this.sessionInfo = sessionInfo;
         state(State.INIT);
     }
 
     public void close(final Aeron aeron, final ErrorHandler errorHandler)
     {
-        if (null == responsePublication)
+        disconnect(aeron, errorHandler);
+        if (NULL_VALUE != counterRegistrationId)
         {
-            aeron.asyncRemovePublication(responsePublicationId);
+            aeron.asyncRemoveCounter(counterRegistrationId);
+            counterRegistrationId = NULL_VALUE;
         }
         else
         {
-            CloseHelper.close(errorHandler, responsePublication);
-            responsePublication = null;
+            CloseHelper.close(errorHandler, counter);
+            counter = null;
         }
 
         state(State.CLOSED);
@@ -169,17 +194,24 @@ final class ClusterSession implements ClusterClientSession
         closeReason = CloseReason.NULL_VAL;
     }
 
-    void asyncConnect(final Aeron aeron)
+    void asyncConnect(final Aeron aeron, final MutableDirectBuffer tempBuffer, final int clusterId)
     {
+        counterRegistrationId = addSessionCounter(aeron, tempBuffer, clusterId);
         responsePublicationId = aeron.asyncAddPublication(responseChannel, responseStreamId);
     }
 
-    void connect(final ErrorHandler errorHandler, final Aeron aeron)
+    void connect(
+        final ErrorHandler errorHandler,
+        final Aeron aeron,
+        final MutableDirectBuffer tempBuffer,
+        final int clusterId)
     {
         if (null != responsePublication)
         {
             throw new ClusterException("response publication already added");
         }
+
+        counterRegistrationId = addSessionCounter(aeron, tempBuffer, clusterId);
 
         try
         {
@@ -194,9 +226,10 @@ final class ClusterSession implements ClusterClientSession
 
     void disconnect(final Aeron aeron, final ErrorHandler errorHandler)
     {
-        if (null == responsePublication)
+        if (NULL_VALUE != responsePublicationId)
         {
             aeron.asyncRemovePublication(responsePublicationId);
+            responsePublicationId = NULL_VALUE;
         }
         else
         {
@@ -212,15 +245,28 @@ final class ClusterSession implements ClusterClientSession
             if (!aeron.isCommandActive(responsePublicationId))
             {
                 responsePublication = aeron.getPublication(responsePublicationId);
+                responsePublicationId = NULL_VALUE;
+
+                counter = aeron.getCounter(counterRegistrationId);
+                counterRegistrationId = NULL_VALUE;
+
                 if (null != responsePublication)
                 {
-                    responsePublicationId = Aeron.NULL_VALUE;
+                    if (null != counter)
+                    {
+                        AeronCounters.setReferenceId(
+                            aeron.context().countersMetaDataBuffer(),
+                            aeron.context().countersValuesBuffer(),
+                            counter.id(),
+                            responsePublication.registrationId());
+                        counter.setRelease(id);
+                    }
+
                     timeOfLastActivityNs = nowNs;
                     state(State.CONNECTING);
                 }
                 else
                 {
-                    responsePublicationId = Aeron.NULL_VALUE;
                     state(State.INVALID);
                 }
             }
@@ -335,14 +381,13 @@ final class ClusterSession implements ClusterClientSession
         if (null != errorLog)
         {
             errorLog.record(new ClusterEvent(
-                code + " " +
-                responseDetail + ", clusterMemberId=" + clusterMemberId + ", id=" + id));
+                code + " " + responseDetail + ", clusterMemberId=" + clusterMemberId + ", id=" + id));
         }
     }
 
     void reject(final EventCode code, final String responseDetail)
     {
-        reject(code, responseDetail, null, Aeron.NULL_VALUE);
+        reject(code, responseDetail, null, NULL_VALUE);
     }
 
     EventCode eventCode()
@@ -415,6 +460,48 @@ final class ClusterSession implements ClusterClientSession
         return requestInput;
     }
 
+    void linkIngressImage(final Header header)
+    {
+        if (NULL_VALUE == ingressImageCorrelationId)
+        {
+            ingressImageCorrelationId = ((Image)header.context()).correlationId();
+        }
+    }
+
+    void unlinkIngressImage()
+    {
+        ingressImageCorrelationId = NULL_VALUE;
+    }
+
+    long ingressImageCorrelationId()
+    {
+        return ingressImageCorrelationId;
+    }
+
+    private long addSessionCounter(final Aeron aeron, final MutableDirectBuffer tempBuffer, final int clusterId)
+    {
+        tempBuffer.putInt(0, clusterId);
+        tempBuffer.putLong(BitUtil.SIZE_OF_INT, id);
+
+        final int keyLength = BitUtil.SIZE_OF_INT + BitUtil.SIZE_OF_LONG;
+
+        int labelLength = 0;
+        labelLength += tempBuffer.putStringWithoutLengthAscii(keyLength + labelLength, "cluster-session: ");
+        labelLength += tempBuffer.putStringWithoutLengthAscii(keyLength + labelLength, sessionInfo);
+        labelLength += tempBuffer.putStringWithoutLengthAscii(
+            keyLength + labelLength, ClusterCounters.CLUSTER_ID_LABEL_SUFFIX);
+        labelLength += tempBuffer.putIntAscii(keyLength + labelLength, clusterId);
+
+        return aeron.asyncAddCounter(
+            AeronCounters.CLUSTER_SESSION_TYPE_ID,
+            tempBuffer,
+            0,
+            keyLength,
+            tempBuffer,
+            keyLength,
+            labelLength);
+    }
+
     static void checkEncodedPrincipalLength(final byte[] encodedPrincipal)
     {
         if (null != encodedPrincipal && encodedPrincipal.length > MAX_ENCODED_PRINCIPAL_LENGTH)
@@ -433,9 +520,11 @@ final class ClusterSession implements ClusterClientSession
             ", openedLogPosition=" + openedLogPosition +
             ", closedLogPosition=" + closedLogPosition +
             ", timeOfLastActivityNs=" + timeOfLastActivityNs +
+            ", ingressImageCorrelationId=" + ingressImageCorrelationId +
             ", responseStreamId=" + responseStreamId +
             ", responseChannel='" + responseChannel + '\'' +
             ", responsePublicationId=" + responsePublicationId +
+            ", counterRegistrationId=" + counterRegistrationId +
             ", closeReason=" + closeReason +
             ", state=" + state +
             ", hasNewLeaderEventPending=" + hasNewLeaderEventPending +

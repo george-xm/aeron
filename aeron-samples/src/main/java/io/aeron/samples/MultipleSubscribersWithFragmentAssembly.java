@@ -23,7 +23,7 @@ import io.aeron.Subscription;
 import io.aeron.logbuffer.FragmentHandler;
 import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.IdleStrategy;
-import org.agrona.concurrent.SigInt;
+import org.agrona.concurrent.ShutdownSignalBarrier;
 
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -49,6 +49,7 @@ public class MultipleSubscribersWithFragmentAssembly
      *
      * @param args passed to the process.
      */
+    @SuppressWarnings("try")
     public static void main(final String[] args)
     {
         System.out.format("Subscribing to %s on stream ID %d and stream ID %d%n",
@@ -62,9 +63,8 @@ public class MultipleSubscribersWithFragmentAssembly
         final FragmentAssembler assembler2 = new FragmentAssembler(reassembledMessage2(STREAM_ID_2));
 
         final AtomicBoolean running = new AtomicBoolean(true);
-        SigInt.register(() -> running.set(false));
-
-        try (Aeron aeron = Aeron.connect(ctx);
+        try (ShutdownSignalBarrier ignore = new ShutdownSignalBarrier(() -> running.set(false));
+            Aeron aeron = Aeron.connect(ctx);
             Subscription subscription1 = aeron.addSubscription(CHANNEL, STREAM_ID_1);
             Subscription subscription2 = aeron.addSubscription(CHANNEL, STREAM_ID_2))
         {

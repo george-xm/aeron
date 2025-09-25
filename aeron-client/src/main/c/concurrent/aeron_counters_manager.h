@@ -174,52 +174,85 @@ inline int aeron_counters_reader_init(
     return 0;
 }
 
-inline void aeron_counter_set_ordered(volatile int64_t *addr, int64_t value)
+inline void aeron_counter_set_release(volatile int64_t *addr, int64_t value)
 {
     AERON_SET_RELEASE(*addr, value);
 }
 
-inline int64_t aeron_counter_get(volatile int64_t *addr)
+inline int64_t aeron_counter_get_plain(volatile int64_t *addr)
 {
     return *addr;
 }
 
-inline int64_t aeron_counter_get_volatile(volatile int64_t *addr)
+inline int64_t aeron_counter_get_acquire(volatile int64_t *addr)
 {
     int64_t value;
     AERON_GET_ACQUIRE(value, *addr);
     return value;
 }
 
-inline int64_t aeron_counter_increment(volatile int64_t *addr, int64_t value)
+inline int64_t aeron_counter_increment(volatile int64_t *addr)
+{
+    int64_t result;
+    AERON_GET_AND_ADD_INT64(result, *addr, 1);
+    return result;
+}
+
+inline int64_t aeron_counter_increment_release(volatile int64_t *addr)
+{
+    int64_t current_value = *addr;
+    AERON_SET_RELEASE(*addr, current_value + 1);
+    return current_value;
+}
+
+inline int64_t aeron_counter_increment_plain(volatile int64_t *addr)
+{
+    int64_t current_value = *addr;
+    *addr = current_value + 1;
+    return current_value;
+}
+
+inline int64_t aeron_counter_get_and_add(volatile int64_t *addr, int64_t value)
 {
     int64_t result;
     AERON_GET_AND_ADD_INT64(result, *addr, value);
     return result;
 }
 
-inline int64_t aeron_counter_ordered_increment(volatile int64_t *addr, int64_t value)
-{
-    int64_t current_value;
-    AERON_GET_ACQUIRE(current_value, *addr);
-    AERON_SET_RELEASE(*addr, (current_value + value));
-    return current_value;
-}
-
-inline int64_t aeron_counter_add_ordered(volatile int64_t *addr, int64_t value)
+inline int64_t aeron_counter_get_and_add_release(volatile int64_t *addr, int64_t value)
 {
     int64_t current = *addr;
-    AERON_SET_RELEASE(*addr, (current + value));
+    AERON_SET_RELEASE(*addr, current + value);
     return current;
 }
 
-inline bool aeron_counter_propose_max_ordered(volatile int64_t *addr, int64_t proposed_value)
+inline int64_t aeron_counter_get_and_add_plain(volatile int64_t *addr, int64_t value)
+{
+    int64_t current = *addr;
+    *addr = current + value;
+    return current;
+}
+
+inline bool aeron_counter_propose_max_release(volatile int64_t *addr, int64_t proposed_value)
 {
     bool updated = false;
 
     if (*addr < proposed_value)
     {
         AERON_SET_RELEASE(*addr, proposed_value);
+        updated = true;
+    }
+
+    return updated;
+}
+
+inline bool aeron_counter_propose_max_plain(volatile int64_t *addr, int64_t proposed_value)
+{
+    bool updated = false;
+
+    if (*addr < proposed_value)
+    {
+        *addr = proposed_value;
         updated = true;
     }
 

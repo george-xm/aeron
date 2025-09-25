@@ -276,9 +276,21 @@ final class PendingServiceMessageTracker
         return buffer.getLong(clusterSessionIdOffset, SessionMessageHeaderDecoder.BYTE_ORDER) <= logServiceSessionId;
     }
 
-    static int serviceId(final long clusterSessionId)
+    static int serviceIdFromLogMessage(final long clusterSessionId)
     {
         return ((int)(clusterSessionId >>> 56)) & 0x7F;
+    }
+
+    /**
+     * Services use different approach for communicating the serviceId, this method extracts the serviceId from a
+     * cluster session id sent via an inter-service message.
+     *
+     * @param clusterSessionId passed in on an inter-service message.
+     * @return the associated serviceId.
+     */
+    static int serviceIdFromServiceMessage(final long clusterSessionId)
+    {
+        return (int)clusterSessionId;
     }
 
     static long serviceSessionId(final int serviceId, final long sessionId)

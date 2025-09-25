@@ -19,14 +19,12 @@
 #include "aeron_alloc.h"
 #include "aeron_driver_conductor.h"
 
-#define AERON_COMMAND_PUBLICATION_ERROR_MAX_LENGTH (sizeof(aeron_command_publication_error_t) + AERON_ERROR_MAX_TEXT_LENGTH)
-
 void aeron_driver_conductor_proxy_offer(aeron_driver_conductor_proxy_t *conductor_proxy, void *cmd, size_t length)
 {
     aeron_rb_write_result_t result;
     while (AERON_RB_FULL == (result = aeron_mpsc_rb_write(conductor_proxy->command_queue, 1, cmd, length)))
     {
-        aeron_counter_ordered_increment(conductor_proxy->fail_counter, 1);
+        aeron_counter_increment_release(conductor_proxy->fail_counter);
         sched_yield();
     }
 

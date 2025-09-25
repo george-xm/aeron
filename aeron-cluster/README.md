@@ -26,7 +26,7 @@ file system.
 Unique features to Aeron Cluster include support for reliable distributed timers, inter-service messaging, remote data
 centre backup, and unparalleled performance.
 
-[Cluster Tutorial](https://github.com/real-logic/aeron/wiki/Cluster-Tutorial) is a good place to start.
+[Cluster Tutorial](https://github.com/aeron-io/aeron/wiki/Cluster-Tutorial) is a good place to start.
 
 Usage
 =====
@@ -39,8 +39,6 @@ The cluster can run in various configurations:
     recommended way to use Cluster. Automatic elections are more reliable.
  - **Automatic Elections:** Automatic elections (default) can be enabled to have a leader elected at random from the
     members with the most up-to-date log.
- - **Dynamic Membership:** Cluster node membership can be dynamic with support for members to join and quit the cluster
-    with membership changes recorded in the log.
        
 The majority of cluster members determine consensus. Clusters should typically be 3 or 5 in population size. However,
 2 node clusters are supported whereby both members must agree the log and in the event of failure the remaining member
@@ -49,5 +47,5 @@ must be manually reconfigured as a single node cluster to progress.
 Aeron Cluster Protocol
 =====
 
-Messages are specified using [SBE](https://github.com/real-logic/simple-binary-encoding) in this schema
-[aeron-cluster-codecs.xml](https://github.com/real-logic/aeron/blob/master/aeron-cluster/src/main/resources/cluster/aeron-cluster-codecs.xml).
+Messages are specified using [SBE](https://github.com/aeron-io/simple-binary-encoding) in this schema
+[aeron-cluster-codecs.xml](https://github.com/aeron-io/aeron/blob/master/aeron-cluster/src/main/resources/cluster/aeron-cluster-codecs.xml).

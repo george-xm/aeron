@@ -171,7 +171,7 @@ protected:
             throw std::runtime_error("could not create counter: " + std::string(aeron_errmsg()));
         }
         m_position_limit_addr = aeron_counters_manager_addr(&m_counters_manager, position_limit_counter_id);
-        aeron_counter_set_ordered(m_position_limit_addr, INT64_MAX);
+        aeron_counter_set_release(m_position_limit_addr, INT64_MAX);
 
         const int32_t channel_status_indicator_id = aeron_counters_manager_allocate(
             &m_counters_manager,
@@ -520,7 +520,7 @@ TEST_F(PublicationTest, offerBackPressureIfPublicationLimitReached)
     m_publication->log_meta_data->term_tail_counters[partition_index] = packTail(term_id, term_offset);
     const int64_t limit_position = aeron_logbuffer_compute_position(
         term_id, term_offset, m_publication->position_bits_to_shift, m_publication->initial_term_id);
-    aeron_counter_set_ordered(m_position_limit_addr, limit_position);
+    aeron_counter_set_release(m_position_limit_addr, limit_position);
 
     const int64_t position = aeron_publication_offer(
         m_publication,
@@ -549,7 +549,7 @@ TEST_F(PublicationTest, offerNotConnectedIfPublicationLimitReached)
     m_publication->log_meta_data->is_connected = false;
     const int64_t limit_position = aeron_logbuffer_compute_position(
         term_id, term_offset - 32, m_publication->position_bits_to_shift, m_publication->initial_term_id);
-    aeron_counter_set_ordered(m_position_limit_addr, limit_position);
+    aeron_counter_set_release(m_position_limit_addr, limit_position);
 
     const int64_t position = aeron_publication_offer(
         m_publication,
@@ -575,7 +575,7 @@ TEST_F(PublicationTest, offerMaxPositionExceededIfPublicationLimitReached)
     const int32_t term_id = INT32_MIN + (INITIAL_TERM_ID - 1);
     m_publication->log_meta_data->active_term_count = term_count;
     m_publication->log_meta_data->term_tail_counters[partition_index] = packTail(term_id, term_offset);
-    aeron_counter_set_ordered(m_position_limit_addr, 64);
+    aeron_counter_set_release(m_position_limit_addr, 64);
 
     const int64_t position = aeron_publication_offer(
         m_publication,
@@ -781,7 +781,7 @@ TEST_F(PublicationTest, vectorOfferBackPressureIfPublicationLimitReached)
     m_publication->log_meta_data->term_tail_counters[partition_index] = packTail(term_id, term_offset);
     const int64_t limit_position = aeron_logbuffer_compute_position(
         term_id, term_offset, m_publication->position_bits_to_shift, m_publication->initial_term_id);
-    aeron_counter_set_ordered(m_position_limit_addr, limit_position);
+    aeron_counter_set_release(m_position_limit_addr, limit_position);
 
     const int64_t position = aeron_publication_offerv(
         m_publication,
@@ -812,7 +812,7 @@ TEST_F(PublicationTest, vectorOfferNotConnectedIfPublicationLimitReached)
     m_publication->log_meta_data->is_connected = false;
     const int64_t limit_position = aeron_logbuffer_compute_position(
         term_id, term_offset - 32, m_publication->position_bits_to_shift, m_publication->initial_term_id);
-    aeron_counter_set_ordered(m_position_limit_addr, limit_position);
+    aeron_counter_set_release(m_position_limit_addr, limit_position);
 
     const int64_t position = aeron_publication_offerv(
         m_publication,
@@ -840,7 +840,7 @@ TEST_F(PublicationTest, vectorOfferMaxPositionExceededIfPublicationLimitReached)
     const int32_t term_id = INT32_MIN + (INITIAL_TERM_ID - 1);
     m_publication->log_meta_data->active_term_count = term_count;
     m_publication->log_meta_data->term_tail_counters[partition_index] = packTail(term_id, term_offset);
-    aeron_counter_set_ordered(m_position_limit_addr, 64);
+    aeron_counter_set_release(m_position_limit_addr, 64);
 
     const int64_t position = aeron_publication_offerv(
         m_publication,
@@ -1041,7 +1041,7 @@ TEST_F(PublicationTest, tryClaimBackPressureIfPublicationLimitReached)
     m_publication->log_meta_data->term_tail_counters[partition_index] = packTail(term_id, term_offset);
     const int64_t limit_position = aeron_logbuffer_compute_position(
         term_id, term_offset, m_publication->position_bits_to_shift, m_publication->initial_term_id);
-    aeron_counter_set_ordered(m_position_limit_addr, limit_position);
+    aeron_counter_set_release(m_position_limit_addr, limit_position);
 
     const int64_t position = aeron_publication_try_claim(
         m_publication,
@@ -1068,7 +1068,7 @@ TEST_F(PublicationTest, tryClaimNotConnectedIfPublicationLimitReached)
     m_publication->log_meta_data->is_connected = false;
     const int64_t limit_position = aeron_logbuffer_compute_position(
         term_id, term_offset - 32, m_publication->position_bits_to_shift, m_publication->initial_term_id);
-    aeron_counter_set_ordered(m_position_limit_addr, limit_position);
+    aeron_counter_set_release(m_position_limit_addr, limit_position);
 
     const int64_t position = aeron_publication_try_claim(
         m_publication,
@@ -1092,7 +1092,7 @@ TEST_F(PublicationTest, tryClaimMaxPositionExceededIfPublicationLimitReached)
     const int32_t term_id = INT32_MIN + (INITIAL_TERM_ID - 1);
     m_publication->log_meta_data->active_term_count = term_count;
     m_publication->log_meta_data->term_tail_counters[partition_index] = packTail(term_id, term_offset);
-    aeron_counter_set_ordered(m_position_limit_addr, 64);
+    aeron_counter_set_release(m_position_limit_addr, 64);
 
     const int64_t position = aeron_publication_try_claim(
         m_publication,

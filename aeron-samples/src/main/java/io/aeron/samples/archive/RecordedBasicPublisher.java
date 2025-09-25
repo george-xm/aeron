@@ -21,7 +21,10 @@ import io.aeron.archive.codecs.SourceLocation;
 import io.aeron.archive.status.RecordingPos;
 import io.aeron.samples.SampleConfiguration;
 import org.agrona.BufferUtil;
-import org.agrona.concurrent.*;
+import org.agrona.concurrent.IdleStrategy;
+import org.agrona.concurrent.ShutdownSignalBarrier;
+import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.concurrent.YieldingIdleStrategy;
 import org.agrona.concurrent.status.CountersReader;
 
 import java.util.concurrent.TimeUnit;
@@ -50,18 +53,18 @@ public class RecordedBasicPublisher
      * @param args passed to the process.
      * @throws InterruptedException if the thread sleep delay is interrupted.
      */
+    @SuppressWarnings("try")
     public static void main(final String[] args) throws InterruptedException
     {
         System.out.println("Publishing to " + CHANNEL + " on stream id " + STREAM_ID);
-
-        final AtomicBoolean running = new AtomicBoolean(true);
-        SigInt.register(() -> running.set(false));
 
         // Create a unique response stream id so not to clash with other archive clients.
         final AeronArchive.Context archiveCtx = new AeronArchive.Context()
             .controlResponseStreamId(AeronArchive.Configuration.controlResponseStreamId() + 1);
 
-        try (AeronArchive archive = AeronArchive.connect(archiveCtx))
+        final AtomicBoolean running = new AtomicBoolean(true);
+        try (ShutdownSignalBarrier ignore = new ShutdownSignalBarrier(() -> running.set(false));
+            AeronArchive archive = AeronArchive.connect(archiveCtx))
         {
             archive.startRecording(CHANNEL, STREAM_ID, SourceLocation.LOCAL);
 

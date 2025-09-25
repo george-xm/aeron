@@ -188,6 +188,7 @@ int aeron_client_conductor_subscription_remove_image(aeron_subscription_t *subsc
     }
 
     image->removal_change_number = subscription->conductor_fields.next_change_number;
+    aeron_image_close(image);
 
     return aeron_client_conductor_subscription_install_new_image_list(subscription, new_image_list);
 }
@@ -285,6 +286,8 @@ int aeron_subscription_image_count(aeron_subscription_t *subscription)
 
     AERON_GET_ACQUIRE(image_list, subscription->conductor_fields.image_lists_head.next_list);
 
+    aeron_subscription_propose_last_image_change_number(subscription, image_list->change_number);
+
     return (int)image_list->length;
 }
 
@@ -363,12 +366,14 @@ int aeron_subscription_image_retain(aeron_subscription_t *subscription, aeron_im
         return -1;
     }
 
-    /*
-    * Update the subscriptions last image change number so that if the subscription isn't polling or touching
-    * or touched the image list, then at least this will allow the previous image_lists to be reclaimed.
-    */
-    aeron_subscription_propose_last_image_change_number(
-        subscription, aeron_subscription_last_image_list_change_number(subscription));
+    aeron_image_list_t *volatile image_list;
+    AERON_GET_ACQUIRE(image_list, subscription->conductor_fields.image_lists_head.next_list);
+
+    if (-1 == aeron_subscription_find_image_index(image_list, image))
+    {
+        AERON_SET_ERR(EINVAL, "Image not found: correlationId=%" PRIi64, image->key.correlation_id);
+        return -1;
+    }
 
     aeron_image_incr_refcnt(image);
 
@@ -387,12 +392,14 @@ int aeron_subscription_image_release(aeron_subscription_t *subscription, aeron_i
         return -1;
     }
 
-    /*
-     * Update the subscriptions last image change number so that if the subscription isn't polling or touching
-     * or touched the image list, then at least this will allow the previous image_lists to be reclaimed.
-     */
-    aeron_subscription_propose_last_image_change_number(
-        subscription, aeron_subscription_last_image_list_change_number(subscription));
+    aeron_image_list_t *volatile image_list;
+    AERON_GET_ACQUIRE(image_list, subscription->conductor_fields.image_lists_head.next_list);
+
+    if (-1 == aeron_subscription_find_image_index(image_list, image))
+    {
+        AERON_SET_ERR(EINVAL, "Image not found: correlationId=%" PRIi64, image->key.correlation_id);
+        return -1;
+    }
 
     aeron_image_decr_refcnt(image);
 

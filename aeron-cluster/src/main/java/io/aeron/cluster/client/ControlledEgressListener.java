@@ -60,12 +60,12 @@ public interface ControlledEgressListener
      * @param detail           Textual detail to explain the event.
      */
     default void onSessionEvent(
-        long correlationId,
-        long clusterSessionId,
-        long leadershipTermId,
-        int leaderMemberId,
-        EventCode code,
-        String detail)
+        final long correlationId,
+        final long clusterSessionId,
+        final long leadershipTermId,
+        final int leaderMemberId,
+        final EventCode code,
+        final String detail)
     {
     }
 
@@ -75,9 +75,13 @@ public interface ControlledEgressListener
      * @param clusterSessionId to which the event belongs.
      * @param leadershipTermId for identifying the active term of leadership
      * @param leaderMemberId   identity of the active leader.
-     * @param ingressEndpoints for connecting to the cluster which can be updated due to dynamic membership.
+     * @param ingressEndpoints for connecting to the cluster.
      */
-    default void onNewLeader(long clusterSessionId, long leadershipTermId, int leaderMemberId, String ingressEndpoints)
+    default void onNewLeader(
+        final long clusterSessionId,
+        final long leadershipTermId,
+        final int leaderMemberId,
+        final String ingressEndpoints)
     {
     }
 
@@ -94,14 +98,14 @@ public interface ControlledEgressListener
      * @param payloadLength    of the payload.
      */
     default void onAdminResponse(
-        long clusterSessionId,
-        long correlationId,
-        AdminRequestType requestType,
-        AdminResponseCode responseCode,
-        String message,
-        DirectBuffer payload,
-        int payloadOffset,
-        int payloadLength)
+        final long clusterSessionId,
+        final long correlationId,
+        final AdminRequestType requestType,
+        final AdminResponseCode responseCode,
+        final String message,
+        final DirectBuffer payload,
+        final int payloadOffset,
+        final int payloadLength)
     {
     }
 }

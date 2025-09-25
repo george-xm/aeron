@@ -22,6 +22,8 @@
 #include "aeron_driver_context.h"
 #include "aeron_driver_conductor.h"
 
+static int aeron_driver_uri_get_response_correlation_id(aeron_uri_params_t *uri_params, int64_t *response_correlation_id);
+
 int aeron_uri_get_term_length_param(aeron_uri_params_t *uri_params, aeron_driver_uri_publication_params_t *params)
 {
     const char *value_str;
@@ -125,7 +127,7 @@ int aeron_uri_get_publication_window_length_param(aeron_uri_params_t *uri_params
         {
             AERON_SET_ERR(
                 EINVAL,
-                "%s=" PRIu64 " cannot be less than the %s=" PRIu64,
+                "%s=%" PRIu64 " cannot be less than the %s=%" PRIu64,
                 AERON_URI_PUBLICATION_WINDOW_KEY,
                 value,
                 AERON_URI_MTU_LENGTH_KEY,
@@ -137,7 +139,7 @@ int aeron_uri_get_publication_window_length_param(aeron_uri_params_t *uri_params
         {
             AERON_SET_ERR(
                 EINVAL,
-                "%s=" PRIu64 " must not exceed half the %s=" PRIu64,
+                "%s=%" PRIu64 " must not exceed half the %s=%" PRIu64,
                 AERON_URI_PUBLICATION_WINDOW_KEY,
                 value,
                 AERON_URI_TERM_LENGTH_KEY,
@@ -223,6 +225,7 @@ int aeron_diver_uri_publication_params(
 
     params->linger_timeout_ns = context->publication_linger_timeout_ns;
     params->untethered_window_limit_timeout_ns = context->untethered_window_limit_timeout_ns;
+    params->untethered_linger_timeout_ns = context->untethered_linger_timeout_ns;
     params->untethered_resting_timeout_ns = context->untethered_resting_timeout_ns;
     params->term_length = AERON_URI_IPC == uri->type ? context->ipc_term_buffer_length : context->term_buffer_length;
     params->has_term_length = false;
@@ -406,8 +409,7 @@ int aeron_diver_uri_publication_params(
         return -1;
     }
 
-    if (aeron_uri_get_int64(
-        uri_params, AERON_URI_RESPONSE_CORRELATION_ID_KEY, AERON_NULL_VALUE, &params->response_correlation_id) < 0)
+    if (aeron_driver_uri_get_response_correlation_id(uri_params, &params->response_correlation_id) < 0)
     {
         return -1;
     }
@@ -419,6 +421,25 @@ int aeron_diver_uri_publication_params(
     {
         AERON_APPEND_ERR("%s", "");
         return -1;
+    }
+
+    uint64_t cur_val = 0;
+    if (aeron_uri_get_timeout(
+            uri_params,
+            AERON_URI_UNTETHERED_LINGER_TIMEOUT_KEY,
+            &cur_val) < 0)
+    {
+        AERON_APPEND_ERR("%s", "");
+        return -1;
+    }
+
+    if (cur_val > 0)
+    {
+        params->untethered_linger_timeout_ns = (int64_t)cur_val;
+    }
+    else if (params->untethered_linger_timeout_ns == AERON_NULL_VALUE)
+    {
+        params->untethered_linger_timeout_ns = (int64_t)params->untethered_window_limit_timeout_ns;
     }
 
     if (aeron_uri_get_timeout(
@@ -443,6 +464,9 @@ int aeron_driver_uri_subscription_params(
     params->is_tether = context->tether_subscriptions;
     params->is_rejoin = context->rejoin_stream;
     params->initial_window_length = context->initial_window_length;
+    params->untethered_window_limit_timeout_ns = context->untethered_window_limit_timeout_ns;
+    params->untethered_linger_timeout_ns = context->untethered_linger_timeout_ns;
+    params->untethered_resting_timeout_ns = context->untethered_resting_timeout_ns;
 
     aeron_uri_params_t *uri_params = AERON_URI_IPC == uri->type ?
         &uri->params.ipc.additional_params : &uri->params.udp.additional_params;
@@ -483,7 +507,47 @@ int aeron_driver_uri_subscription_params(
     params->is_response =
         (AERON_URI_UDP == uri->type &&
         NULL != uri->params.udp.control_mode &&
-        strcmp(uri->params.udp.control_mode, AERON_UDP_CHANNEL_CONTROL_MODE_RESPONSE_VALUE) == 0);
+        0 == strcmp(AERON_UDP_CHANNEL_CONTROL_MODE_RESPONSE_VALUE, uri->params.udp.control_mode)) ||
+        (AERON_URI_IPC == uri->type &&
+        NULL != uri->params.ipc.control_mode &&
+        0 == strcmp(AERON_UDP_CHANNEL_CONTROL_MODE_RESPONSE_VALUE, uri->params.ipc.control_mode));
+
+    if (aeron_uri_get_timeout(
+        uri_params,
+        AERON_URI_UNTETHERED_WINDOW_LIMIT_TIMEOUT_KEY,
+        &params->untethered_window_limit_timeout_ns) < 0)
+    {
+        AERON_APPEND_ERR("%s", "");
+        return -1;
+    }
+
+    uint64_t cur_val = 0;
+    if (aeron_uri_get_timeout(
+        uri_params,
+        AERON_URI_UNTETHERED_LINGER_TIMEOUT_KEY,
+        &cur_val) < 0)
+    {
+        AERON_APPEND_ERR("%s", "");
+        return -1;
+    }
+
+    if (cur_val > 0)
+    {
+        params->untethered_linger_timeout_ns = (int64_t)cur_val;
+    }
+    else if (params->untethered_linger_timeout_ns == AERON_NULL_VALUE)
+    {
+        params->untethered_linger_timeout_ns = (int64_t)params->untethered_window_limit_timeout_ns;
+    }
+
+    if (aeron_uri_get_timeout(
+        uri_params,
+        AERON_URI_UNTETHERED_RESTING_TIMEOUT_KEY,
+        &params->untethered_resting_timeout_ns) < 0)
+    {
+        AERON_APPEND_ERR("%s", "");
+        return -1;
+    }
 
     return 0;
 }
@@ -583,4 +647,37 @@ const char *aeron_driver_uri_get_offset_info(int32_t offset)
     }
 
     return "";
+}
+
+int aeron_driver_uri_get_response_correlation_id(aeron_uri_params_t *uri_params, int64_t *response_correlation_id)
+{
+    const char *response_correlation_id_str = aeron_uri_find_param_value(uri_params, AERON_URI_RESPONSE_CORRELATION_ID_KEY);
+
+    if (NULL == response_correlation_id_str)
+    {
+        return 0;
+    }
+
+    if (0 == strcmp(AERON_URI_RESPONSE_CORRELATION_ID_PROTOTYPE, response_correlation_id_str))
+    {
+        *response_correlation_id = AERON_URI_PROTOTYPE_VALUE_CORRELATION_ID;
+        return 0;
+    }
+
+    if (aeron_uri_get_int64(
+        uri_params, AERON_URI_RESPONSE_CORRELATION_ID_KEY, AERON_NULL_VALUE, response_correlation_id) < 0)
+    {
+        goto invalid_correlation_id;
+    }
+
+    if (*response_correlation_id < -1)
+    {
+        goto invalid_correlation_id;
+    }
+
+    return 0;
+
+invalid_correlation_id:
+    AERON_SET_ERR(EINVAL, "%s", "invalid response-correlation-id, must be a number greater than or equal to -1, or 'prototype'");
+    return -1;
 }

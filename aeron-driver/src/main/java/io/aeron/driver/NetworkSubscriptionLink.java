@@ -20,8 +20,6 @@ import io.aeron.driver.media.ReceiveChannelEndpoint;
 class NetworkSubscriptionLink extends SubscriptionLink
 {
     private final boolean isReliable;
-    private final boolean isRejoin;
-    private final boolean isResponse;
     private final ReceiveChannelEndpoint channelEndpoint;
 
     NetworkSubscriptionLink(
@@ -35,24 +33,12 @@ class NetworkSubscriptionLink extends SubscriptionLink
         super(registrationId, streamId, channelUri, aeronClient, params);
 
         this.isReliable = params.isReliable;
-        this.isRejoin = params.isRejoin;
-        this.isResponse = params.isResponse;
         this.channelEndpoint = channelEndpoint;
     }
 
     boolean isReliable()
     {
         return isReliable;
-    }
-
-    boolean isRejoin()
-    {
-        return isRejoin;
-    }
-
-    boolean isResponse()
-    {
-        return isResponse;
     }
 
     ReceiveChannelEndpoint channelEndpoint()

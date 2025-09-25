@@ -89,11 +89,6 @@ public enum ClusterEventCode implements EventCode
     COMMIT_POSITION(12, ClusterEventDissector::dissectCommitPosition),
 
     /**
-     * Event when an event to add a new passive member is received.
-     */
-    ADD_PASSIVE_MEMBER(13, ClusterEventDissector::dissectAddPassiveMember),
-
-    /**
      * Event when a session is closed.
      */
     APPEND_SESSION_CLOSE(14, ClusterEventDissector::dissectAppendCloseSession),

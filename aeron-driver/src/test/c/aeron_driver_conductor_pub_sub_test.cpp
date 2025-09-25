@@ -914,7 +914,7 @@ TEST_P(DriverConductorPubSubTest, shouldRetryFreeOperationsAfterTimeoutSendChann
     free_map_raw_log = false;
     int64_t *free_fails_counter = aeron_system_counter_addr(
         &m_conductor.m_conductor.system_counters, AERON_SYSTEM_COUNTER_FREE_FAILS);
-    EXPECT_EQ(aeron_counter_get(free_fails_counter), 0);
+    EXPECT_EQ(aeron_counter_get_plain(free_fails_counter), 0);
 
     doWorkForNs(
         timeout,
@@ -924,7 +924,7 @@ TEST_P(DriverConductorPubSubTest, shouldRetryFreeOperationsAfterTimeoutSendChann
             clientKeepalive(client_id);
         });
 
-    const int64_t free_fails = aeron_counter_get(free_fails_counter);
+    const int64_t free_fails = aeron_counter_get_plain(free_fails_counter);
     EXPECT_GT(free_fails, 1);
     EXPECT_EQ(aeron_driver_conductor_num_clients(&m_conductor.m_conductor), 1u);
     EXPECT_EQ(GetParam()->numPublications(&m_conductor.m_conductor), 0u);
@@ -941,7 +941,7 @@ TEST_P(DriverConductorPubSubTest, shouldRetryFreeOperationsAfterTimeoutSendChann
             clientKeepalive(client_id);
         });
 
-    EXPECT_EQ(aeron_counter_get(free_fails_counter), free_fails);
+    EXPECT_EQ(aeron_counter_get_plain(free_fails_counter), free_fails);
     EXPECT_EQ(aeron_driver_conductor_num_clients(&m_conductor.m_conductor), 1u);
 }
 

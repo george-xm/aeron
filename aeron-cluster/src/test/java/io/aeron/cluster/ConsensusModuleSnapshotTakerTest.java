@@ -185,7 +185,7 @@ class ConsensusModuleSnapshotTakerTest
         final String responseChannel = "aeron:ipc";
         final int length = MessageHeaderEncoder.ENCODED_LENGTH + ClusterSessionEncoder.BLOCK_LENGTH +
             ClusterSessionEncoder.responseChannelHeaderLength() + responseChannel.length();
-        final ClusterSession clusterSession = new ClusterSession(556, 42, responseChannel);
+        final ClusterSession clusterSession = new ClusterSession(556, 42, responseChannel, "");
         clusterSession.loadSnapshotState(
             13, 1024, 800, CloseReason.CLIENT_ACTION);
         when(publication.maxPayloadLength()).thenReturn(length);
@@ -221,7 +221,7 @@ class ConsensusModuleSnapshotTakerTest
         final String responseChannel = "aeron:ipc?alias=very very very long string|mtu=4444";
         final int length = MessageHeaderEncoder.ENCODED_LENGTH + ClusterSessionEncoder.BLOCK_LENGTH +
             ClusterSessionEncoder.responseChannelHeaderLength() + responseChannel.length();
-        final ClusterSession clusterSession = new ClusterSession(42, 4, responseChannel);
+        final ClusterSession clusterSession = new ClusterSession(42, 4, responseChannel, "");
         clusterSession.loadSnapshotState(
             -1, 76, 98, CloseReason.TIMEOUT);
 

@@ -113,7 +113,7 @@ public class StaticCounterFlyweight
      */
     public String toString()
     {
-        return "AddStaticCounterFlyweight{" +
+        return "StaticCounterFlyweight{" +
             "correlationId=" + correlationId() +
             ", counterId=" + counterId() +
             "}";

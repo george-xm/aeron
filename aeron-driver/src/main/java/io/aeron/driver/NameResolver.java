@@ -46,7 +46,7 @@ public interface NameResolver
      * @param isReLookup   {@code true} if this is a re-lookup or {@code true} if initial lookup.
      * @return string in {@code name:port} form.
      */
-    default String lookup(String name, String uriParamName, boolean isReLookup)
+    default String lookup(final String name, final String uriParamName, final boolean isReLookup)
     {
         return name;
     }
@@ -60,7 +60,7 @@ public interface NameResolver
      * @see #init(CountersReader, CounterProvider)
      */
     @Deprecated
-    default void init(MediaDriver.Context context)
+    default void init(final MediaDriver.Context context)
     {
         throw new UnsupportedOperationException("deprecated: use NameResolver.init(io.aeron.CounterFactory) instead");
     }
@@ -71,7 +71,7 @@ public interface NameResolver
      * @param countersReader for finding existing counters.
      * @param counterProvider for adding counters.
      */
-    default void init(final CountersReader countersReader, CounterProvider counterProvider)
+    default void init(final CountersReader countersReader, final CounterProvider counterProvider)
     {
     }
 

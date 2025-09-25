@@ -43,6 +43,8 @@ import org.junit.jupiter.params.provider.CsvSource;
 import java.nio.file.Path;
 import java.util.concurrent.ThreadLocalRandom;
 
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.lessThan;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @ExtendWith({ EventLogExtension.class, InterruptingTestCallback.class })
@@ -68,7 +70,6 @@ public class ArchiveAbandonedClientTest
             .sharedIdleStrategy(YieldingIdleStrategy.INSTANCE)
             .spiesSimulateConnection(true)
             .dirDeleteOnStart(true)
-            .enableExperimentalFeatures(true)
             .threadingMode(ThreadingMode.SHARED);
 
         driver = TestMediaDriver.launch(driverCtx, systemTestWatcher);
@@ -87,7 +88,7 @@ public class ArchiveAbandonedClientTest
         "aeron:udp?endpoint=localhost:10001, aeron:udp?endpoint=localhost:10002",
         "aeron:udp?endpoint=localhost:10001, aeron:udp?control=localhost:10002|control-mode=response",
     })
-    @InterruptAfter(10)
+    @InterruptAfter(15)
     void test(final String requestChannel, final String responseChannel)
     {
         launch(requestChannel, responseChannel);
@@ -104,12 +105,14 @@ public class ArchiveAbandonedClientTest
             counters, recordedPublication.sessionId(), client1.archiveId());
         final long recordingId = RecordingPos.getRecordingId(counters, recordingCounterId);
 
-        final int archiveResponseSubscriptionCounterId =
+        final int responseSubscriptionCounterId1 =
             client1.controlResponsePoller().subscription().imageAtIndex(0).subscriberPositionId();
+        final int responseSubscriptionCounterId2 =
+            client2.controlResponsePoller().subscription().imageAtIndex(0).subscriberPositionId();
 
         // ensure at least one full term of archive responses is generated in order to trigger blocking
         final int controlTermBufferLength = archive.context().controlTermBufferLength();
-        while (counters.getCounterValue(archiveResponseSubscriptionCounterId) < controlTermBufferLength)
+        while (counters.getCounterValue(responseSubscriptionCounterId1) < controlTermBufferLength)
         {
             final int length = ThreadLocalRandom.current().nextInt(buffer.capacity());
             while (recordedPublication.offer(buffer, 0, length) < 0)
@@ -121,6 +124,13 @@ public class ArchiveAbandonedClientTest
             {
                 Tests.yield();
             }
+        }
+
+        if (counters.getCounterState(responseSubscriptionCounterId2) == CountersReader.RECORD_ALLOCATED)
+        {
+            assertThat(
+                counters.getCounterValue(responseSubscriptionCounterId2),
+                lessThan(counters.getCounterValue(responseSubscriptionCounterId1)));
         }
     }
 

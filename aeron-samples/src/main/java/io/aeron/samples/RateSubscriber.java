@@ -18,10 +18,13 @@ package io.aeron.samples;
 import io.aeron.Aeron;
 import io.aeron.Subscription;
 import io.aeron.driver.MediaDriver;
-import org.agrona.CloseHelper;
-import org.agrona.concurrent.SigInt;
+import org.agrona.concurrent.ShutdownSignalBarrier;
 
-import java.util.concurrent.*;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.aeron.samples.SamplesUtil.rateReporterHandler;
@@ -41,50 +44,46 @@ public class RateSubscriber
      *
      * @param args passed to the process.
      * @throws InterruptedException if the task is interrupted
-     * @throws ExecutionException if the {@link Future} has an error.
+     * @throws ExecutionException   if the {@link Future} has an error.
      */
     public static void main(final String[] args) throws InterruptedException, ExecutionException
     {
         System.out.println("Subscribing to " + CHANNEL + " on stream id " + STREAM_ID);
 
-        final MediaDriver driver = EMBEDDED_MEDIA_DRIVER ? MediaDriver.launchEmbedded() : null;
-        final ExecutorService executor = Executors.newFixedThreadPool(1);
-        final Aeron.Context ctx = new Aeron.Context()
-            .availableImageHandler(SamplesUtil::printAvailableImage)
-            .unavailableImageHandler(SamplesUtil::printUnavailableImage);
-
-        if (EMBEDDED_MEDIA_DRIVER)
-        {
-            ctx.aeronDirectoryName(driver.aeronDirectoryName());
-        }
-
-        final RateReporter reporter = new RateReporter(TimeUnit.SECONDS.toNanos(1), SamplesUtil::printRate);
         final AtomicBoolean running = new AtomicBoolean(true);
-
-        SigInt.register(() ->
+        try (ShutdownSignalBarrier barrier = new ShutdownSignalBarrier(() -> running.set(false));
+            MediaDriver driver = EMBEDDED_MEDIA_DRIVER ?
+                MediaDriver.launchEmbedded(new MediaDriver.Context().terminationHook(barrier::signalAll)) : null)
         {
-            reporter.halt();
-            running.set(false);
-        });
+            final ExecutorService executor = Executors.newFixedThreadPool(2);
+            final Aeron.Context ctx = new Aeron.Context()
+                .availableImageHandler(SamplesUtil::printAvailableImage)
+                .unavailableImageHandler(SamplesUtil::printUnavailableImage);
 
-        try (Aeron aeron = Aeron.connect(ctx);
-            Subscription subscription = aeron.addSubscription(CHANNEL, STREAM_ID))
-        {
-            final Future<?> future = executor.submit(() -> SamplesUtil.subscriberLoop(
-                rateReporterHandler(reporter), FRAGMENT_COUNT_LIMIT, running).accept(subscription));
+            if (EMBEDDED_MEDIA_DRIVER)
+            {
+                ctx.aeronDirectoryName(driver.aeronDirectoryName());
+            }
 
-            reporter.run();
+            final RateReporter reporter = new RateReporter(TimeUnit.SECONDS.toNanos(1), SamplesUtil::printRate);
 
-            System.out.println("Shutting down...");
-            future.get();
+            try (Aeron aeron = Aeron.connect(ctx);
+                Subscription subscription = aeron.addSubscription(CHANNEL, STREAM_ID))
+            {
+                executor.submit(() -> SamplesUtil.subscriberLoop(
+                    rateReporterHandler(reporter), FRAGMENT_COUNT_LIMIT, running).accept(subscription));
+                executor.submit(reporter);
+
+                barrier.await();
+
+                System.out.println("Shutting down...");
+
+                executor.shutdown();
+                if (!executor.awaitTermination(5, TimeUnit.SECONDS))
+                {
+                    System.out.println("Warning: not all tasks completed promptly");
+                }
+            }
         }
-
-        executor.shutdown();
-        if (!executor.awaitTermination(5, TimeUnit.SECONDS))
-        {
-            System.out.println("Warning: not all tasks completed promptly");
-        }
-
-        CloseHelper.close(driver);
     }
 }

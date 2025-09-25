@@ -76,7 +76,7 @@ public class LocalSocketAddressStatus
         final String name,
         final int typeId)
     {
-        tempBuffer.putInt(0, channelStatusId);
+        tempBuffer.putInt(CHANNEL_STATUS_ID_OFFSET, channelStatusId);
         tempBuffer.putInt(LOCAL_SOCKET_ADDRESS_LENGTH_OFFSET, 0);
 
         final int keyLength = INITIAL_LENGTH;

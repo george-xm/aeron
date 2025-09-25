@@ -15,7 +15,14 @@
  */
 package io.aeron.archive;
 
-import io.aeron.*;
+import io.aeron.Aeron;
+import io.aeron.AeronCounters;
+import io.aeron.ChannelUri;
+import io.aeron.ChannelUriStringBuilder;
+import io.aeron.CommonContext;
+import io.aeron.Counter;
+import io.aeron.Image;
+import io.aeron.RethrowingErrorHandler;
 import io.aeron.archive.checksum.Checksum;
 import io.aeron.archive.checksum.Checksums;
 import io.aeron.archive.client.AeronArchive;
@@ -32,8 +39,30 @@ import io.aeron.security.AuthenticatorSupplier;
 import io.aeron.security.AuthorisationService;
 import io.aeron.security.AuthorisationServiceSupplier;
 import io.aeron.version.Versioned;
-import org.agrona.*;
-import org.agrona.concurrent.*;
+import org.agrona.AsciiEncoding;
+import org.agrona.BitUtil;
+import org.agrona.CloseHelper;
+import org.agrona.ErrorHandler;
+import org.agrona.ExpandableArrayBuffer;
+import org.agrona.IoUtil;
+import org.agrona.LangUtil;
+import org.agrona.MarkFile;
+import org.agrona.Strings;
+import org.agrona.SystemUtil;
+import org.agrona.concurrent.Agent;
+import org.agrona.concurrent.AgentInvoker;
+import org.agrona.concurrent.AgentRunner;
+import org.agrona.concurrent.AgentTerminationException;
+import org.agrona.concurrent.CountedErrorHandler;
+import org.agrona.concurrent.EpochClock;
+import org.agrona.concurrent.IdleStrategy;
+import org.agrona.concurrent.NanoClock;
+import org.agrona.concurrent.NoOpLock;
+import org.agrona.concurrent.ShutdownSignalBarrier;
+import org.agrona.concurrent.SystemEpochClock;
+import org.agrona.concurrent.SystemNanoClock;
+import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.concurrent.YieldingIdleStrategy;
 import org.agrona.concurrent.errors.DistinctErrorLog;
 import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.concurrent.status.StatusIndicator;
@@ -55,20 +84,36 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 import static io.aeron.Aeron.NULL_VALUE;
-import static io.aeron.AeronCounters.*;
 import static io.aeron.AeronCounters.ARCHIVE_CONTROL_SESSIONS_TYPE_ID;
 import static io.aeron.AeronCounters.ARCHIVE_ERROR_COUNT_TYPE_ID;
+import static io.aeron.AeronCounters.ARCHIVE_RECORDER_MAX_WRITE_TIME_TYPE_ID;
+import static io.aeron.AeronCounters.ARCHIVE_RECORDER_TOTAL_WRITE_BYTES_TYPE_ID;
+import static io.aeron.AeronCounters.ARCHIVE_RECORDER_TOTAL_WRITE_TIME_TYPE_ID;
+import static io.aeron.AeronCounters.ARCHIVE_RECORDING_SESSION_COUNT_TYPE_ID;
+import static io.aeron.AeronCounters.ARCHIVE_REPLAYER_MAX_READ_TIME_TYPE_ID;
+import static io.aeron.AeronCounters.ARCHIVE_REPLAYER_TOTAL_READ_BYTES_TYPE_ID;
+import static io.aeron.AeronCounters.ARCHIVE_REPLAYER_TOTAL_READ_TIME_TYPE_ID;
+import static io.aeron.AeronCounters.ARCHIVE_REPLAY_SESSION_COUNT_TYPE_ID;
+import static io.aeron.AeronCounters.validateCounterTypeId;
 import static io.aeron.CommonContext.ENDPOINT_PARAM_NAME;
-import static io.aeron.archive.Archive.Configuration.*;
+import static io.aeron.CommonContext.fallbackLogger;
+import static io.aeron.archive.Archive.Configuration.ERROR_BUFFER_LENGTH_DEFAULT;
+import static io.aeron.archive.Archive.Configuration.SESSION_LIVENESS_CHECK_INTERVAL_DEFAULT_NS;
+import static io.aeron.archive.Archive.Configuration.SESSION_LIVENESS_CHECK_INTERVAL_PROP_NAME;
 import static io.aeron.archive.ArchiveThreadingMode.DEDICATED;
 import static io.aeron.exceptions.AeronException.Category.ERROR;
-import static io.aeron.logbuffer.LogBufferDescriptor.*;
+import static io.aeron.logbuffer.LogBufferDescriptor.TERM_MAX_LENGTH;
+import static io.aeron.logbuffer.LogBufferDescriptor.TERM_MIN_LENGTH;
+import static io.aeron.logbuffer.LogBufferDescriptor.checkTermLength;
 import static java.lang.System.getProperty;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static org.agrona.BitUtil.CACHE_LINE_LENGTH;
 import static org.agrona.BitUtil.isPowerOfTwo;
 import static org.agrona.BufferUtil.allocateDirectAligned;
-import static org.agrona.SystemUtil.*;
+import static org.agrona.SystemUtil.getDurationInNanos;
+import static org.agrona.SystemUtil.getSizeAsInt;
+import static org.agrona.SystemUtil.getSizeAsLong;
+import static org.agrona.SystemUtil.loadPropertiesFiles;
 
 /**
  * The Aeron Archive which allows for the recording and replay of local and remote {@link io.aeron.Publication}s.
@@ -124,23 +169,21 @@ public final class Archive implements AutoCloseable
     {
         loadPropertiesFiles(args);
 
-        final ShutdownSignalBarrier shutdownSignalBarrier = new ShutdownSignalBarrier();
-        final Archive.Context ctx = new Context().errorHandler(
-            (throwable) ->
-            {
-                if (throwable instanceof AgentTerminationException)
+        try (ShutdownSignalBarrier barrier = new ShutdownSignalBarrier();
+            Archive ignore = launch(new Context().errorHandler(
+                (throwable) ->
                 {
-                    shutdownSignalBarrier.signal();
-                }
-                else if (AeronException.isFatal(throwable))
-                {
-                    shutdownSignalBarrier.signal();
-                }
-            });
-
-        try (Archive ignore = launch(ctx))
+                    if (throwable instanceof AgentTerminationException)
+                    {
+                        barrier.signal();
+                    }
+                    else if (AeronException.isFatal(throwable))
+                    {
+                        barrier.signal();
+                    }
+                })))
         {
-            shutdownSignalBarrier.await();
+            barrier.await();
             System.out.println("Shutdown Archive...");
         }
     }
@@ -480,8 +523,8 @@ public final class Archive implements AutoCloseable
         /**
          * Default threshold value for the conductor work cycle threshold to track for being exceeded.
          */
-        @Config(defaultType = DefaultType.LONG, defaultLong = 1000L * 1000 * 1000)
-        public static final long CONDUCTOR_CYCLE_THRESHOLD_DEFAULT_NS = TimeUnit.MILLISECONDS.toNanos(1000);
+        @Config(defaultType = DefaultType.LONG, defaultLong = 1_000_000L)
+        public static final long CONDUCTOR_CYCLE_THRESHOLD_DEFAULT_NS = TimeUnit.MILLISECONDS.toNanos(1);
 
         /**
          * Property name for threshold value for the recorder work cycle threshold to track for being exceeded.
@@ -492,8 +535,8 @@ public final class Archive implements AutoCloseable
         /**
          * Default threshold value for the recorder work cycle threshold to track for being exceeded.
          */
-        @Config(defaultType = DefaultType.LONG, defaultLong = 1000L * 1000 * 1000)
-        public static final long RECORDER_CYCLE_THRESHOLD_DEFAULT_NS = TimeUnit.MILLISECONDS.toNanos(1000);
+        @Config(defaultType = DefaultType.LONG, defaultLong = 1_000_000L)
+        public static final long RECORDER_CYCLE_THRESHOLD_DEFAULT_NS = TimeUnit.MILLISECONDS.toNanos(1);
 
         /**
          * Property name for threshold value for the replayer work cycle threshold to track for being exceeded.
@@ -504,8 +547,8 @@ public final class Archive implements AutoCloseable
         /**
          * Default threshold value for the replayer work cycle threshold to track for being exceeded.
          */
-        @Config(defaultType = DefaultType.LONG, defaultLong = 1000L * 1000 * 1000)
-        public static final long REPLAYER_CYCLE_THRESHOLD_DEFAULT_NS = TimeUnit.MILLISECONDS.toNanos(1000);
+        @Config(defaultType = DefaultType.LONG, defaultLong = 1_000_000L)
+        public static final long REPLAYER_CYCLE_THRESHOLD_DEFAULT_NS = TimeUnit.MILLISECONDS.toNanos(1);
 
         /**
          * Should the archive delete existing files on start. Default is false and should only be true for testing.
@@ -922,6 +965,15 @@ public final class Archive implements AutoCloseable
             {
                 return DEFAULT_AUTHORISATION_SERVICE_SUPPLIER;
             }
+            else if (AuthorisationService.DENY_ALL_NAME.equals(supplierClassName))
+            {
+                return () -> AuthorisationService.DENY_ALL;
+            }
+            else if (AuthorisationService.ALLOW_ALL_NAME.equals(supplierClassName))
+            {
+                fallbackLogger().println("Warning: Cluster authorisation service set to allow all requests");
+                return () -> AuthorisationService.ALLOW_ALL;
+            }
 
             try
             {
@@ -995,6 +1047,7 @@ public final class Archive implements AutoCloseable
     public static final class Context implements Cloneable
     {
         private static final VarHandle IS_CONCLUDED_VH;
+
         static
         {
             try
@@ -1163,6 +1216,13 @@ public final class Archive implements AutoCloseable
                     "Archive.Context.recordingEventsEnabled is true");
             }
 
+            if (null != mediaDriverAgentInvoker && ArchiveThreadingMode.INVOKER != threadingMode)
+            {
+                throw new ConfigurationException(
+                    "Archive.Context.threadingMode(ArchiveThreadingMode.INVOKER) must be set if " +
+                    "Archive.Context.mediaDriverAgentInvoker is set");
+            }
+
             if (null == archiveDir)
             {
                 archiveDir = new File(archiveDirectoryName);
@@ -1222,6 +1282,8 @@ public final class Archive implements AutoCloseable
                 aeronDirectoryName = aeron.context().aeronDirectoryName();
             }
 
+            concludeArchiveId();
+
             if (null == markFile)
             {
                 if (errorBufferLength < ERROR_BUFFER_LENGTH_DEFAULT ||
@@ -1245,6 +1307,7 @@ public final class Archive implements AutoCloseable
 
                 final ExpandableArrayBuffer tempBuffer = new ExpandableArrayBuffer();
 
+                final String clientName = "archive archiveId=" + archiveId;
                 if (null == aeron)
                 {
                     ownsAeronClient = true;
@@ -1254,17 +1317,16 @@ public final class Archive implements AutoCloseable
                             .aeronDirectoryName(aeronDirectoryName)
                             .epochClock(epochClock)
                             .nanoClock(nanoClock)
-                            .errorHandler(RethrowingErrorHandler.INSTANCE)
+                            .errorHandler(errorHandler)
                             .driverAgentInvoker(mediaDriverAgentInvoker)
                             .useConductorAgentInvoker(true)
                             .subscriberErrorHandler(RethrowingErrorHandler.INSTANCE)
                             .awaitingIdleStrategy(YieldingIdleStrategy.INSTANCE)
                             .clientLock(NoOpLock.INSTANCE)
-                            .clientName(NULL_VALUE != archiveId ? "archive-" + archiveId : "archive"));
+                            .clientName(clientName));
 
                     if (null == errorCounter)
                     {
-                        concludeArchiveId();
                         if (NULL_VALUE !=
                             ArchiveCounters.find(aeron.countersReader(), ARCHIVE_ERROR_COUNT_TYPE_ID, archiveId))
                         {
@@ -1278,8 +1340,6 @@ public final class Archive implements AutoCloseable
                     throw new ArchiveException(
                         "Aeron client instance must set Aeron.Context.useConductorInvoker(true)");
                 }
-
-                concludeArchiveId();
 
                 if (!(aeron.context().subscriberErrorHandler() instanceof RethrowingErrorHandler))
                 {
@@ -1463,7 +1523,11 @@ public final class Archive implements AutoCloseable
                     }
                 }
 
-                archiveClientContext.aeron(aeron).lock(NoOpLock.INSTANCE).errorHandler(errorHandler);
+                archiveClientContext
+                    .aeron(aeron)
+                    .lock(NoOpLock.INSTANCE)
+                    .errorHandler(errorHandler)
+                    .clientName(clientName);
 
                 if (null == controlSessionsCounter)
                 {
@@ -2456,7 +2520,7 @@ public final class Archive implements AutoCloseable
          * @see Configuration#SEGMENT_FILE_LENGTH_PROP_NAME
          */
         @Config
-        int segmentFileLength()
+        public int segmentFileLength()
         {
             return segmentFileLength;
         }
@@ -2488,7 +2552,7 @@ public final class Archive implements AutoCloseable
          * @see Configuration#FILE_SYNC_LEVEL_PROP_NAME
          */
         @Config
-        int fileSyncLevel()
+        public int fileSyncLevel()
         {
             return fileSyncLevel;
         }
@@ -2525,7 +2589,7 @@ public final class Archive implements AutoCloseable
          * @see Configuration#CATALOG_FILE_SYNC_LEVEL_PROP_NAME
          */
         @Config
-        int catalogFileSyncLevel()
+        public int catalogFileSyncLevel()
         {
             return catalogFileSyncLevel;
         }
@@ -2554,7 +2618,7 @@ public final class Archive implements AutoCloseable
          *
          * @return the {@link AgentInvoker} that should be used for the Media Driver if running in a lightweight mode.
          */
-        AgentInvoker mediaDriverAgentInvoker()
+        public AgentInvoker mediaDriverAgentInvoker()
         {
             return mediaDriverAgentInvoker;
         }
@@ -3671,8 +3735,8 @@ public final class Archive implements AutoCloseable
          */
         public void close()
         {
-            CloseHelper.close(countedErrorHandler, archiveDirChannel);
             CloseHelper.close(countedErrorHandler, catalog);
+            CloseHelper.close(countedErrorHandler, archiveDirChannel);
 
             if (ownsAeronClient)
             {
@@ -3716,7 +3780,15 @@ public final class Archive implements AutoCloseable
         {
             if (NULL_VALUE == archiveId)
             {
-                archiveId = aeron.clientId();
+                if (null != aeron)
+                {
+                    archiveId = aeron.clientId();
+                }
+                else
+                {
+                    archiveId = CommonContext.nextCorrelationId(
+                        new File(aeronDirectoryName), epochClock, new CommonContext().driverTimeoutMs());
+                }
             }
         }
 

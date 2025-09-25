@@ -128,7 +128,7 @@ int aeron_receive_destination_create(
 
     _destination->has_control_addr = destination_channel->is_multicast || destination_channel->has_explicit_control;
 
-    aeron_counter_set_ordered(
+    aeron_counter_set_release(
         _destination->local_sockaddr_indicator.value_addr, AERON_COUNTER_CHANNEL_ENDPOINT_STATUS_ACTIVE);
 
     // Only take ownership of the destination_channel if the receive destination is successfully created.
@@ -143,7 +143,7 @@ void aeron_receive_destination_delete(
 {
     if (NULL != counters_manager && AERON_NULL_COUNTER_ID != destination->local_sockaddr_indicator.counter_id)
     {
-        aeron_counter_set_ordered(
+        aeron_counter_set_release(
             destination->local_sockaddr_indicator.value_addr, AERON_COUNTER_CHANNEL_ENDPOINT_STATUS_CLOSING);
         aeron_counters_manager_free(counters_manager, destination->local_sockaddr_indicator.counter_id);
         destination->local_sockaddr_indicator.counter_id = AERON_NULL_COUNTER_ID;

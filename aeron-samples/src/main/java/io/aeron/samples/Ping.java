@@ -25,7 +25,6 @@ import io.aeron.logbuffer.FragmentHandler;
 import org.HdrHistogram.Histogram;
 import org.agrona.BitUtil;
 import org.agrona.BufferUtil;
-import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
 import org.agrona.collections.MutableLong;
 import org.agrona.concurrent.BusySpinIdleStrategy;
@@ -71,60 +70,61 @@ public class Ping
      */
     public static void main(final String[] args) throws InterruptedException
     {
-        final MediaDriver driver = EMBEDDED_MEDIA_DRIVER ? MediaDriver.launchEmbedded() : null;
-        final Aeron.Context ctx = new Aeron.Context()
-            .availableImageHandler(Ping::availablePongImageHandler)
-            .unavailableImageHandler(SamplesUtil::printUnavailableImage);
-        final MutableLong receiveCount = new MutableLong();
-        final FragmentHandler fragmentHandler = new ImageFragmentAssembler(
-            (buffer, offset, length, header) -> pongHandler(buffer, offset, receiveCount));
-
-        if (EMBEDDED_MEDIA_DRIVER)
+        try (MediaDriver driver = EMBEDDED_MEDIA_DRIVER ? MediaDriver.launchEmbedded() : null)
         {
-            ctx.aeronDirectoryName(driver.aeronDirectoryName());
-        }
+            final Aeron.Context ctx = new Aeron.Context()
+                .availableImageHandler(Ping::availablePongImageHandler)
+                .unavailableImageHandler(SamplesUtil::printUnavailableImage);
+            final MutableLong receiveCount = new MutableLong();
+            final FragmentHandler fragmentHandler = new ImageFragmentAssembler(
+                (buffer, offset, length, header) -> pongHandler(buffer, offset, receiveCount));
 
-        System.out.println("Publishing Ping at " + PING_CHANNEL + " on stream id " + PING_STREAM_ID);
-        System.out.println("Subscribing Pong at " + PONG_CHANNEL + " on stream id " + PONG_STREAM_ID);
-        System.out.println("Message length of " + MESSAGE_LENGTH + " bytes");
-        System.out.println("Using exclusive publications " + EXCLUSIVE_PUBLICATIONS);
-
-        try (Aeron aeron = Aeron.connect(ctx);
-            Subscription subscription = aeron.addSubscription(PONG_CHANNEL, PONG_STREAM_ID);
-            Publication publication = EXCLUSIVE_PUBLICATIONS ?
-                aeron.addExclusivePublication(PING_CHANNEL, PING_STREAM_ID) :
-                aeron.addPublication(PING_CHANNEL, PING_STREAM_ID))
-        {
-            System.out.println("Waiting for new image from Pong...");
-            LATCH.await();
-
-            System.out.println(
-                "Warming up... " + WARMUP_NUMBER_OF_ITERATIONS +
-                " iterations of " + WARMUP_NUMBER_OF_MESSAGES + " messages");
-
-            for (int i = 0; i < WARMUP_NUMBER_OF_ITERATIONS; i++)
+            if (EMBEDDED_MEDIA_DRIVER)
             {
-                roundTripMessages(fragmentHandler, publication, subscription, receiveCount, WARMUP_NUMBER_OF_MESSAGES);
-                Thread.yield();
+                ctx.aeronDirectoryName(driver.aeronDirectoryName());
             }
 
-            Thread.sleep(100);
-            final ContinueBarrier barrier = new ContinueBarrier("Execute again?");
+            System.out.println("Publishing Ping at " + PING_CHANNEL + " on stream id " + PING_STREAM_ID);
+            System.out.println("Subscribing Pong at " + PONG_CHANNEL + " on stream id " + PONG_STREAM_ID);
+            System.out.println("Message length of " + MESSAGE_LENGTH + " bytes");
+            System.out.println("Using exclusive publications " + EXCLUSIVE_PUBLICATIONS);
 
-            do
+            try (Aeron aeron = Aeron.connect(ctx);
+                Subscription subscription = aeron.addSubscription(PONG_CHANNEL, PONG_STREAM_ID);
+                Publication publication = EXCLUSIVE_PUBLICATIONS ?
+                    aeron.addExclusivePublication(PING_CHANNEL, PING_STREAM_ID) :
+                    aeron.addPublication(PING_CHANNEL, PING_STREAM_ID))
             {
-                HISTOGRAM.reset();
-                System.out.println("Pinging " + NUMBER_OF_MESSAGES + " messages");
+                System.out.println("Waiting for new image from Pong...");
+                LATCH.await();
 
-                roundTripMessages(fragmentHandler, publication, subscription, receiveCount, NUMBER_OF_MESSAGES);
-                System.out.println("Histogram of RTT latencies in microseconds.");
+                System.out.println(
+                    "Warming up... " + WARMUP_NUMBER_OF_ITERATIONS +
+                    " iterations of " + WARMUP_NUMBER_OF_MESSAGES + " messages");
 
-                HISTOGRAM.outputPercentileDistribution(System.out, 1000.0);
+                for (int i = 0; i < WARMUP_NUMBER_OF_ITERATIONS; i++)
+                {
+                    roundTripMessages(
+                        fragmentHandler, publication, subscription, receiveCount, WARMUP_NUMBER_OF_MESSAGES);
+                    Thread.yield();
+                }
+
+                Thread.sleep(100);
+                final ContinueBarrier barrier = new ContinueBarrier("Execute again?");
+
+                do
+                {
+                    HISTOGRAM.reset();
+                    System.out.println("Pinging " + NUMBER_OF_MESSAGES + " messages");
+
+                    roundTripMessages(fragmentHandler, publication, subscription, receiveCount, NUMBER_OF_MESSAGES);
+                    System.out.println("Histogram of RTT latencies in microseconds.");
+
+                    HISTOGRAM.outputPercentileDistribution(System.out, 1000.0);
+                }
+                while (barrier.await());
             }
-            while (barrier.await());
         }
-
-        CloseHelper.close(driver);
     }
 
     private static void roundTripMessages(

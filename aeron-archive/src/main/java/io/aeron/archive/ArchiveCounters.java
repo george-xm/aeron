@@ -32,7 +32,7 @@ import static org.agrona.concurrent.status.CountersReader.*;
  */
 public final class ArchiveCounters
 {
-    static final String ARCHIVE_ID_LABEL_PREFIX = " - archiveId=";
+    static final String ARCHIVE_ID_LABEL_SUFFIX = " - archiveId=";
 
     private ArchiveCounters()
     {
@@ -103,7 +103,7 @@ public final class ArchiveCounters
         final MutableDirectBuffer tempBuffer, final int offset, final long archiveId)
     {
         int suffixLength = 0;
-        suffixLength += tempBuffer.putStringWithoutLengthAscii(offset, ARCHIVE_ID_LABEL_PREFIX);
+        suffixLength += tempBuffer.putStringWithoutLengthAscii(offset, ARCHIVE_ID_LABEL_SUFFIX);
         suffixLength += tempBuffer.putLongAscii(offset + suffixLength, archiveId);
         return suffixLength;
     }
@@ -119,12 +119,12 @@ public final class ArchiveCounters
         if (archiveId < 0)
         {
             return Long.MIN_VALUE == archiveId ?
-                ARCHIVE_ID_LABEL_PREFIX.length() + AsciiEncoding.MIN_LONG_VALUE.length :
-                ARCHIVE_ID_LABEL_PREFIX.length() + 1 + AsciiEncoding.digitCount(-archiveId);
+                ARCHIVE_ID_LABEL_SUFFIX.length() + AsciiEncoding.MIN_LONG_VALUE.length :
+                ARCHIVE_ID_LABEL_SUFFIX.length() + 1 + AsciiEncoding.digitCount(-archiveId);
         }
         else
         {
-            return ARCHIVE_ID_LABEL_PREFIX.length() + AsciiEncoding.digitCount(archiveId);
+            return ARCHIVE_ID_LABEL_SUFFIX.length() + AsciiEncoding.digitCount(archiveId);
         }
     }
 

@@ -30,6 +30,7 @@ typedef struct aeron_archive_proxy_stct
     int64_t control_session_id;
     int retry_attempts;
     uint8_t buffer[AERON_ARCHIVE_PROXY_REQUEST_BUFFER_LENGTH];
+    char client_info[AERON_COUNTER_MAX_CLIENT_NAME_LENGTH * 2];
 }
 aeron_archive_proxy_t;
 

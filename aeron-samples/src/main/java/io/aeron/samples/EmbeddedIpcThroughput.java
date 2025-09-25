@@ -15,10 +15,18 @@
  */
 package io.aeron.samples;
 
-import io.aeron.*;
-import io.aeron.driver.*;
-import org.agrona.*;
-import org.agrona.concurrent.*;
+import io.aeron.Aeron;
+import io.aeron.CommonContext;
+import io.aeron.ConcurrentPublication;
+import io.aeron.Publication;
+import io.aeron.Subscription;
+import io.aeron.driver.MediaDriver;
+import io.aeron.driver.ThreadingMode;
+import org.agrona.BufferUtil;
+import org.agrona.DirectBuffer;
+import org.agrona.concurrent.IdleStrategy;
+import org.agrona.concurrent.ShutdownSignalBarrier;
+import org.agrona.concurrent.UnsafeBuffer;
 
 import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -48,12 +56,9 @@ public class EmbeddedIpcThroughput
         loadPropertiesFiles(args);
 
         final AtomicBoolean running = new AtomicBoolean(true);
-        SigInt.register(() -> running.set(false));
-
-        final MediaDriver.Context ctx = new MediaDriver.Context()
-            .threadingMode(ThreadingMode.SHARED);
-
-        try (MediaDriver mediaDriver = MediaDriver.launch(ctx);
+        try (ShutdownSignalBarrier barrier = new ShutdownSignalBarrier(() -> running.set(false));
+            MediaDriver mediaDriver = MediaDriver.launch(new MediaDriver.Context()
+                .threadingMode(ThreadingMode.SHARED).terminationHook(barrier::signalAll));
             Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(mediaDriver.aeronDirectoryName()));
             Subscription subscription = aeron.addSubscription(CHANNEL, STREAM_ID);
             Publication publication = aeron.addPublication(CHANNEL, STREAM_ID))

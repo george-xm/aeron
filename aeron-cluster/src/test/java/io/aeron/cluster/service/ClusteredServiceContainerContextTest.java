@@ -17,16 +17,20 @@ package io.aeron.cluster.service;
 
 import io.aeron.Aeron;
 import io.aeron.ChannelUri;
+import io.aeron.CommonContext;
 import io.aeron.Counter;
 import io.aeron.RethrowingErrorHandler;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.cluster.codecs.mark.ClusterComponentType;
-import org.agrona.CloseHelper;
+import io.aeron.driver.MediaDriver;
+import io.aeron.driver.ThreadingMode;
+import org.agrona.BitUtil;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.NoOpLock;
 import org.agrona.concurrent.SystemEpochClock;
 import org.agrona.concurrent.status.AtomicCounter;
 import org.hamcrest.Matchers;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -42,11 +46,27 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 
 import static io.aeron.cluster.service.ClusterMarkFile.ERROR_BUFFER_MIN_LENGTH;
+import static io.aeron.cluster.service.ClusterMarkFile.HEADER_LENGTH;
 import static io.aeron.cluster.service.ClusteredServiceContainer.Configuration.MARK_FILE_DIR_PROP_NAME;
+import static io.aeron.logbuffer.LogBufferDescriptor.PAGE_MIN_SIZE;
 import static java.nio.charset.StandardCharsets.US_ASCII;
-import static org.hamcrest.MatcherAssert.*;
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrowsExactly;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyInt;
+import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class ClusteredServiceContainerContextTest
 {
@@ -62,6 +82,7 @@ class ClusteredServiceContainerContextTest
         final Aeron.Context aeronContext = mock(Aeron.Context.class);
         when(aeronContext.aeronDirectoryName()).thenReturn("funny");
         when(aeronContext.subscriberErrorHandler()).thenReturn(errorHandler);
+        when(aeronContext.filePageSize()).thenReturn(PAGE_MIN_SIZE);
         final Aeron aeron = mock(Aeron.class);
         when(aeron.addCounter(
             anyInt(), any(DirectBuffer.class), anyInt(), anyInt(), any(DirectBuffer.class), anyInt(), anyInt()))
@@ -74,7 +95,14 @@ class ClusteredServiceContainerContextTest
             .errorCounter(errorCounter)
             .errorHandler(errorHandler)
             .clusteredService(clusteredService)
-            .clusterDir(clusterDir);
+            .clusterDir(clusterDir)
+            .serviceId(serviceId);
+    }
+
+    @AfterEach
+    void tearDown()
+    {
+        context.close();
     }
 
     @Test
@@ -82,19 +110,12 @@ class ClusteredServiceContainerContextTest
     {
         final ClusteredServiceContainer.Context anotherInstance = context.clone();
 
-        try
-        {
-            context.conclude();
+        context.conclude();
 
-            final RuntimeException exception = assertThrowsExactly(RuntimeException.class, anotherInstance::conclude);
-            final Throwable cause = exception.getCause();
-            assertInstanceOf(IllegalStateException.class, cause);
-            assertEquals("active Mark file detected", cause.getMessage());
-        }
-        finally
-        {
-            context.close();
-        }
+        final RuntimeException exception = assertThrowsExactly(RuntimeException.class, anotherInstance::conclude);
+        final Throwable cause = exception.getCause();
+        assertInstanceOf(IllegalStateException.class, cause);
+        assertEquals("active Mark file detected", cause.getMessage());
     }
 
     @Test
@@ -120,7 +141,6 @@ class ClusteredServiceContainerContextTest
         finally
         {
             System.clearProperty(MARK_FILE_DIR_PROP_NAME);
-            CloseHelper.quietClose(context::close);
         }
     }
 
@@ -132,19 +152,12 @@ class ClusteredServiceContainerContextTest
         assertFalse(markFileDir.exists());
         context.serviceId(serviceId).markFileDir(markFileDir);
 
-        try
-        {
-            context.conclude();
+        context.conclude();
 
-            assertEquals(markFileDir.getCanonicalFile(), context.markFileDir());
-            assertTrue(markFileDir.getCanonicalFile().exists());
-            assertTrue(
-                new File(context.clusterDir(), ClusterMarkFile.linkFilenameForService(context.serviceId())).exists());
-        }
-        finally
-        {
-            CloseHelper.quietClose(context::close);
-        }
+        assertEquals(markFileDir.getCanonicalFile(), context.markFileDir());
+        assertTrue(markFileDir.getCanonicalFile().exists());
+        assertTrue(
+            new File(context.clusterDir(), ClusterMarkFile.linkFilenameForService(context.serviceId())).exists());
     }
 
     @ParameterizedTest
@@ -158,16 +171,9 @@ class ClusteredServiceContainerContextTest
         assertTrue(oldLinkFile.createNewFile());
         assertTrue(oldLinkFile.exists());
 
-        try
-        {
-            context.conclude();
+        context.conclude();
 
-            assertFalse(oldLinkFile.exists());
-        }
-        finally
-        {
-            CloseHelper.quietClose(context::close);
-        }
+        assertFalse(oldLinkFile.exists());
     }
 
     @Test
@@ -181,30 +187,24 @@ class ClusteredServiceContainerContextTest
             ClusterComponentType.CONSENSUS_MODULE,
             ERROR_BUFFER_MIN_LENGTH,
             SystemEpochClock.INSTANCE,
-            10);
+            10,
+            PAGE_MIN_SIZE);
         context
             .serviceId(serviceId)
             .clusterDir(clusterDir)
             .markFileDir(markFileDir)
             .clusterMarkFile(clusterMarkFile);
 
-        try
-        {
-            context.conclude();
+        context.conclude();
 
-            assertEquals(clusterDir.getCanonicalFile(), context.clusterDir());
-            assertEquals(markFileDir.getCanonicalFile(), context.markFileDir());
-            assertEquals(otherDir, context.clusterMarkFile().parentDirectory());
-            assertTrue(clusterDir.getCanonicalFile().exists());
-            assertTrue(markFileDir.getCanonicalFile().exists());
-            final File linkFile = new File(context.clusterDir(), ClusterMarkFile.linkFilenameForService(serviceId));
-            assertTrue(linkFile.exists());
-            assertEquals(otherDir.getCanonicalPath(), new String(Files.readAllBytes(linkFile.toPath()), US_ASCII));
-        }
-        finally
-        {
-            CloseHelper.quietClose(context::close);
-        }
+        assertEquals(clusterDir.getCanonicalFile(), context.clusterDir());
+        assertEquals(markFileDir.getCanonicalFile(), context.markFileDir());
+        assertEquals(otherDir, context.clusterMarkFile().parentDirectory());
+        assertTrue(clusterDir.getCanonicalFile().exists());
+        assertTrue(markFileDir.getCanonicalFile().exists());
+        final File linkFile = new File(context.clusterDir(), ClusterMarkFile.linkFilenameForService(serviceId));
+        assertTrue(linkFile.exists());
+        assertEquals(otherDir.getCanonicalPath(), new String(Files.readAllBytes(linkFile.toPath()), US_ASCII));
     }
 
     @Test
@@ -213,17 +213,10 @@ class ClusteredServiceContainerContextTest
         final Path clusterDir = dir.resolve("explicit/cluster/./dir");
         context.clusterDir(clusterDir.toFile()).clusterDirectoryName("replace-me");
 
-        try
-        {
-            context.conclude();
+        context.conclude();
 
-            assertEquals(clusterDir.toFile().getCanonicalFile(), context.clusterDir());
-            assertEquals(context.clusterDir().getAbsolutePath(), context.clusterDirectoryName());
-        }
-        finally
-        {
-            CloseHelper.quietClose(context::close);
-        }
+        assertEquals(clusterDir.toFile().getCanonicalFile(), context.clusterDir());
+        assertEquals(context.clusterDir().getAbsolutePath(), context.clusterDirectoryName());
     }
 
     @Test
@@ -232,17 +225,10 @@ class ClusteredServiceContainerContextTest
         final Path dir = Paths.get(temp.toString(), "/some/../path");
         context.clusterDir(null).clusterDirectoryName(dir.toString());
 
-        try
-        {
-            context.conclude();
+        context.conclude();
 
-            assertEquals(dir.toFile().getCanonicalFile(), context.clusterDir());
-            assertEquals(context.clusterDir().getAbsolutePath(), context.clusterDirectoryName());
-        }
-        finally
-        {
-            CloseHelper.quietClose(context::close);
-        }
+        assertEquals(dir.toFile().getCanonicalFile(), context.clusterDir());
+        assertEquals(context.clusterDir().getAbsolutePath(), context.clusterDirectoryName());
     }
 
     @ParameterizedTest
@@ -251,16 +237,9 @@ class ClusteredServiceContainerContextTest
     {
         context.clusterId(7).serviceId(5).serviceName(serviceName);
 
-        try
-        {
-            context.conclude();
+        context.conclude();
 
-            assertEquals("clustered-service-7-5", context.serviceName());
-        }
-        finally
-        {
-            CloseHelper.quietClose(context::close);
-        }
+        assertEquals("clustered-service-7-5", context.serviceName());
     }
 
     @Test
@@ -268,16 +247,9 @@ class ClusteredServiceContainerContextTest
     {
         context.clusterId(7).serviceId(5).serviceName("test 13");
 
-        try
-        {
-            context.conclude();
+        context.conclude();
 
-            assertEquals("test 13", context.serviceName());
-        }
-        finally
-        {
-            CloseHelper.quietClose(context::close);
-        }
+        assertEquals("test 13", context.serviceName());
     }
 
     @Test
@@ -285,16 +257,9 @@ class ClusteredServiceContainerContextTest
     {
         context.clusterId(42).serviceId(0).serviceName("test 13");
 
-        try
-        {
-            context.conclude();
+        context.conclude();
 
-            verify(context.aeron().context(), never()).clientName(anyString());
-        }
-        finally
-        {
-            CloseHelper.quietClose(context::close);
-        }
+        verify(context.aeron().context(), never()).clientName(anyString());
     }
 
     @Test
@@ -306,20 +271,13 @@ class ClusteredServiceContainerContextTest
         context.archiveContext(archiveContext);
         assertSame(archiveContext, context.archiveContext());
 
-        try
-        {
-            context.conclude();
+        context.conclude();
 
-            assertSame(archiveContext, context.archiveContext());
-            assertSame(context.aeron(), archiveContext.aeron());
-            assertFalse(archiveContext.ownsAeronClient());
-            assertSame(context.countedErrorHandler(), archiveContext.errorHandler());
-            assertSame(NoOpLock.INSTANCE, archiveContext.lock());
-        }
-        finally
-        {
-            CloseHelper.quietClose(context::close);
-        }
+        assertSame(archiveContext, context.archiveContext());
+        assertSame(context.aeron(), archiveContext.aeron());
+        assertFalse(archiveContext.ownsAeronClient());
+        assertSame(context.countedErrorHandler(), archiveContext.errorHandler());
+        assertSame(NoOpLock.INSTANCE, archiveContext.lock());
     }
 
     @Test
@@ -350,7 +308,6 @@ class ClusteredServiceContainerContextTest
         }
         finally
         {
-            CloseHelper.quietClose(context::close);
             System.clearProperty(AeronArchive.Configuration.LOCAL_CONTROL_CHANNEL_PROP_NAME);
             System.clearProperty(AeronArchive.Configuration.LOCAL_CONTROL_STREAM_ID_PROP_NAME);
         }
@@ -389,7 +346,6 @@ class ClusteredServiceContainerContextTest
         }
         finally
         {
-            CloseHelper.quietClose(context::close);
             System.clearProperty(AeronArchive.Configuration.LOCAL_CONTROL_CHANNEL_PROP_NAME);
             System.clearProperty(AeronArchive.Configuration.LOCAL_CONTROL_STREAM_ID_PROP_NAME);
             System.clearProperty(AeronArchive.Configuration.CONTROL_RESPONSE_STREAM_ID_PROP_NAME);
@@ -416,22 +372,57 @@ class ClusteredServiceContainerContextTest
             .controlResponseStreamId(18);
         context.archiveContext(archiveContext).clusterId(99).serviceId(88);
 
-        try
+        context.conclude();
+
+        assertEquals(
+            ChannelUri.parse(archiveContext.controlRequestChannel()),
+            ChannelUri.parse(expectedControlRequestChannel));
+        assertEquals(
+            ChannelUri.parse(archiveContext.controlResponseChannel()),
+            ChannelUri.parse(expectedControlResponseChannel));
+        assertEquals(42, archiveContext.controlRequestStreamId());
+        assertEquals(18, archiveContext.controlResponseStreamId());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = { 8192, 32 * 1024 })
+    void shouldAlignMarkFileToTheAeronClientFilePageSize(final int filePageSize)
+    {
+        final Aeron.Context aeronContext = context.aeron().context();
+        when(aeronContext.filePageSize()).thenReturn(filePageSize);
+
+        context.conclude();
+
+        final File file = new File(context.markFileDir(), ClusterMarkFile.markFilenameForService(serviceId));
+        assertTrue(file.exists());
+        assertEquals(BitUtil.align(context.errorBufferLength() + HEADER_LENGTH, filePageSize), file.length());
+
+        verify(aeronContext).filePageSize();
+    }
+
+    @Test
+    void shouldAlignMarkFileBasedOnTheMediaDriverFilePageSize() throws IOException
+    {
+        final Path aeronDir = Paths.get(CommonContext.generateRandomDirName());
+        Files.createDirectories(aeronDir);
+
+        final int filePageSize = 1024 * 1024;
+        try (MediaDriver driver = MediaDriver.launch(new MediaDriver.Context()
+            .aeronDirectoryName(aeronDir.toString())
+            .dirDeleteOnShutdown(true)
+            .threadingMode(ThreadingMode.SHARED)
+            .filePageSize(filePageSize)))
         {
+            context
+                .aeron(null)
+                .aeronDirectoryName(driver.aeronDirectoryName())
+                .errorBufferLength(1919191);
+
             context.conclude();
 
-            assertEquals(
-                ChannelUri.parse(archiveContext.controlRequestChannel()),
-                ChannelUri.parse(expectedControlRequestChannel));
-            assertEquals(
-                ChannelUri.parse(archiveContext.controlResponseChannel()),
-                ChannelUri.parse(expectedControlResponseChannel));
-            assertEquals(42, archiveContext.controlRequestStreamId());
-            assertEquals(18, archiveContext.controlResponseStreamId());
-        }
-        finally
-        {
-            CloseHelper.quietClose(context::close);
+            final File file = new File(context.markFileDir(), ClusterMarkFile.markFilenameForService(serviceId));
+            assertTrue(file.exists());
+            assertEquals(BitUtil.align(context.errorBufferLength() + HEADER_LENGTH, filePageSize), file.length());
         }
     }
 }

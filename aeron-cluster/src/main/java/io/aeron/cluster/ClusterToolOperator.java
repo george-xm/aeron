@@ -127,7 +127,7 @@ public class ClusterToolOperator
      */
     protected int recoveryPlan(final PrintStream out, final File clusterDir, final int serviceCount)
     {
-        try (AeronArchive archive = AeronArchive.connect();
+        try (AeronArchive archive = AeronArchive.connect(new AeronArchive.Context().clientName("cluster-tool"));
             RecordingLog recordingLog = new RecordingLog(clusterDir, false))
         {
             out.println(recordingLog.createRecoveryPlan(archive, serviceCount, Aeron.NULL_VALUE));
@@ -316,8 +316,7 @@ public class ClusterToolOperator
                         "currentTimeNs=" + clusterMembership.currentTimeNs +
                         ", leaderMemberId=" + clusterMembership.leaderMemberId +
                         ", memberId=" + clusterMembership.memberId +
-                        ", activeMembers=" + clusterMembership.activeMembers +
-                        ", passiveMembers=" + clusterMembership.passiveMembers);
+                        ", activeMembers=" + clusterMembership.activeMembers);
                 }
                 else
                 {
@@ -544,14 +543,12 @@ public class ClusterToolOperator
             public void onClusterMembersResponse(
                 final long correlationId,
                 final int leaderMemberId,
-                final String activeMembers,
-                final String passiveMembers)
+                final String activeMembers)
             {
                 if (correlationId == id.get())
                 {
                     clusterMembership.leaderMemberId = leaderMemberId;
                     clusterMembership.activeMembersStr = activeMembers;
-                    clusterMembership.passiveMembersStr = passiveMembers;
                     id.set(NULL_VALUE);
                 }
             }
@@ -561,8 +558,7 @@ public class ClusterToolOperator
                 final long currentTimeNs,
                 final int leaderMemberId,
                 final int memberId,
-                final List<ClusterMember> activeMembers,
-                final List<ClusterMember> passiveMembers)
+                final List<ClusterMember> activeMembers)
             {
                 if (correlationId == id.get())
                 {
@@ -570,30 +566,28 @@ public class ClusterToolOperator
                     clusterMembership.leaderMemberId = leaderMemberId;
                     clusterMembership.memberId = memberId;
                     clusterMembership.activeMembers = activeMembers;
-                    clusterMembership.passiveMembers = passiveMembers;
                     clusterMembership.activeMembersStr = ClusterMember.encodeAsString(activeMembers);
-                    clusterMembership.passiveMembersStr = ClusterMember.encodeAsString(passiveMembers);
                     id.set(NULL_VALUE);
                 }
             }
         };
 
         try (Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(controlProperties.aeronDirectoryName));
+            ClusterControlAdapter clusterControlAdapter = new ClusterControlAdapter(
+                aeron.addSubscription(controlProperties.controlChannel, controlProperties.serviceStreamId), listener);
             ConcurrentPublication publication = aeron.addPublication(
                 controlProperties.controlChannel, controlProperties.consensusModuleStreamId);
-            ConsensusModuleProxy consensusModuleProxy = new ConsensusModuleProxy(publication);
-            ClusterControlAdapter clusterControlAdapter = new ClusterControlAdapter(aeron.addSubscription(
-                controlProperties.controlChannel, controlProperties.serviceStreamId), listener))
+            ConsensusModuleProxy consensusModuleProxy = new ConsensusModuleProxy(publication))
         {
             final long deadlineMs = System.currentTimeMillis() + timeoutMs;
             final long correlationId = aeron.nextCorrelationId();
             id.set(correlationId);
 
-            while (!publication.isConnected())
+            while (!clusterControlAdapter.isBound() && publication.availableWindow() <= 0)
             {
                 if (System.currentTimeMillis() > deadlineMs)
                 {
-                    break;
+                    return false;
                 }
                 Thread.yield();
             }
@@ -602,7 +596,7 @@ public class ClusterToolOperator
             {
                 if (System.currentTimeMillis() > deadlineMs)
                 {
-                    break;
+                    return false;
                 }
                 Thread.yield();
             }
@@ -613,14 +607,14 @@ public class ClusterToolOperator
                 {
                     if (System.currentTimeMillis() > deadlineMs)
                     {
-                        break;
+                        return false;
                     }
                     Thread.yield();
                 }
             }
-        }
 
-        return true;
+            return true;
+        }
     }
 
     /**
@@ -712,7 +706,7 @@ public class ClusterToolOperator
                         final AtomicCounter atomicCounter = new AtomicCounter(
                             countersReader.valuesBuffer(), counterId, null);
 
-                        atomicCounter.setOrdered(timeMs);
+                        atomicCounter.setRelease(timeMs);
                         result.value = true;
                     }
                 });
@@ -778,6 +772,7 @@ public class ClusterToolOperator
         final ClusterNodeControlProperties properties = loadControlProperties(clusterDir);
 
         final AeronArchive.Context archiveCtx = new AeronArchive.Context()
+            .clientName("cluster-tool")
             .controlRequestChannel("aeron:ipc")
             .controlResponseChannel("aeron:ipc");
 

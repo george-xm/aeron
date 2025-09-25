@@ -25,13 +25,35 @@ import org.agrona.BitUtil;
 import org.agrona.SystemUtil;
 
 import static io.aeron.ChannelUri.INVALID_TAG;
-import static io.aeron.CommonContext.*;
+import static io.aeron.CommonContext.CONTROL_MODE_RESPONSE;
+import static io.aeron.CommonContext.EOS_PARAM_NAME;
+import static io.aeron.CommonContext.INITIAL_TERM_ID_PARAM_NAME;
+import static io.aeron.CommonContext.LINGER_PARAM_NAME;
+import static io.aeron.CommonContext.MAX_RESEND_PARAM_NAME;
+import static io.aeron.CommonContext.MDC_CONTROL_MODE_PARAM_NAME;
+import static io.aeron.CommonContext.MTU_LENGTH_PARAM_NAME;
+import static io.aeron.CommonContext.PROTOTYPE_CORRELATION_ID;
+import static io.aeron.CommonContext.PUBLICATION_WINDOW_LENGTH_PARAM_NAME;
+import static io.aeron.CommonContext.RESPONSE_CORRELATION_ID_PARAM_NAME;
+import static io.aeron.CommonContext.SESSION_ID_PARAM_NAME;
+import static io.aeron.CommonContext.SPARSE_PARAM_NAME;
+import static io.aeron.CommonContext.SPIES_SIMULATE_CONNECTION_PARAM_NAME;
+import static io.aeron.CommonContext.STREAM_ID_PARAM_NAME;
+import static io.aeron.CommonContext.TERM_ID_PARAM_NAME;
+import static io.aeron.CommonContext.TERM_LENGTH_PARAM_NAME;
+import static io.aeron.CommonContext.TERM_OFFSET_PARAM_NAME;
+import static io.aeron.CommonContext.UNTETHERED_LINGER_TIMEOUT_PARAM_NAME;
+import static io.aeron.CommonContext.UNTETHERED_RESTING_TIMEOUT_PARAM_NAME;
+import static io.aeron.CommonContext.UNTETHERED_WINDOW_LIMIT_TIMEOUT_PARAM_NAME;
 
 final class PublicationParams
 {
+    static final long PROTOTYPE_VALUE_CORRELATION_ID = -2L;
+
     long lingerTimeoutNs;
     long entityTag = ChannelUri.INVALID_TAG;
     long untetheredWindowLimitTimeoutNs;
+    long untetheredLingerTimeoutNs;
     long untetheredRestingTimeoutNs;
     long responseCorrelationId = Aeron.NULL_VALUE;
     int termLength;
@@ -73,6 +95,7 @@ final class PublicationParams
         params.getSparse(channelUri, ctx);
         params.getSpiesSimulateConnection(channelUri, ctx);
         params.getUntetheredWindowLimitTimeout(channelUri, ctx);
+        params.getUntetheredLingerTimeout(channelUri, ctx);
         params.getUntetheredRestingTimeout(channelUri, ctx);
         params.getMaxResend(channelUri, ctx);
 
@@ -96,9 +119,9 @@ final class PublicationParams
                     channelUri);
             }
 
-            params.initialTermId = Integer.parseInt(initialTermIdStr);
-            params.termId = Integer.parseInt(termIdStr);
-            params.termOffset = Integer.parseInt(termOffsetStr);
+            params.initialTermId = parseInt(initialTermIdStr, INITIAL_TERM_ID_PARAM_NAME);
+            params.termId = parseInt(termIdStr, TERM_ID_PARAM_NAME);
+            params.termOffset = parseInt(termOffsetStr, TERM_OFFSET_PARAM_NAME);
 
             if (params.termOffset > params.termLength)
             {
@@ -138,7 +161,7 @@ final class PublicationParams
         }
 
         params.isResponse = CONTROL_MODE_RESPONSE.equals(channelUri.get(MDC_CONTROL_MODE_PARAM_NAME));
-        params.responseCorrelationId = Long.parseLong(channelUri.get(RESPONSE_CORRELATION_ID_PARAM_NAME, "-1"));
+        params.responseCorrelationId = parseResponseCorrelationId(channelUri);
 
         return params;
     }
@@ -177,16 +200,7 @@ final class PublicationParams
         final String streamIdParam = channelUri.get(STREAM_ID_PARAM_NAME);
         if (null != streamIdParam)
         {
-            final int configuredStreamId;
-            try
-            {
-                configuredStreamId = Integer.parseInt(streamIdParam);
-            }
-            catch (final NumberFormatException ex)
-            {
-                throw new InvalidChannelException("invalid " + STREAM_ID_PARAM_NAME + ", must be a number", ex);
-            }
-
+            final int configuredStreamId = parseInt(streamIdParam, STREAM_ID_PARAM_NAME);
             if (streamId != configuredStreamId)
             {
                 throw new InvalidChannelException(
@@ -449,7 +463,7 @@ final class PublicationParams
             }
             else
             {
-                sessionId = Integer.parseInt(sessionIdStr);
+                sessionId = parseInt(sessionIdStr, SESSION_ID_PARAM_NAME);
             }
         }
         else
@@ -488,6 +502,16 @@ final class PublicationParams
             channelUri, UNTETHERED_WINDOW_LIMIT_TIMEOUT_PARAM_NAME, ctx.untetheredWindowLimitTimeoutNs());
     }
 
+    private void getUntetheredLingerTimeout(final ChannelUri channelUri, final MediaDriver.Context ctx)
+    {
+        untetheredLingerTimeoutNs =
+            getTimeoutNs(channelUri, UNTETHERED_LINGER_TIMEOUT_PARAM_NAME, ctx.untetheredLingerTimeoutNs());
+        if (Aeron.NULL_VALUE == untetheredLingerTimeoutNs)
+        {
+            untetheredLingerTimeoutNs = untetheredWindowLimitTimeoutNs;
+        }
+    }
+
     private void getUntetheredRestingTimeout(final ChannelUri channelUri, final MediaDriver.Context ctx)
     {
         untetheredRestingTimeoutNs = getTimeoutNs(
@@ -504,15 +528,7 @@ final class PublicationParams
         }
         else
         {
-            try
-            {
-                maxResend = Integer.parseInt(maxRetransmtsString);
-            }
-            catch (final NumberFormatException ex)
-            {
-                throw new InvalidChannelException(
-                    "invalid " + MAX_RESEND_PARAM_NAME + ", must be a number", ex);
-            }
+            maxResend = parseInt(maxRetransmtsString, MAX_RESEND_PARAM_NAME);
 
             if (maxResend <= 0 || maxResend > Configuration.MAX_RESEND_MAX)
             {
@@ -520,6 +536,59 @@ final class PublicationParams
                     "invalid " + MAX_RESEND_PARAM_NAME + "=" + maxResend +
                     ", must be > 0 and <= " + Configuration.MAX_RESEND_MAX);
             }
+        }
+    }
+
+    private static int parseInt(final String value, final String paramName)
+    {
+        try
+        {
+            return Integer.parseInt(value);
+        }
+        catch (final NumberFormatException ex)
+        {
+            throw new InvalidChannelException(
+                "invalid " + paramName + ", must be a number", ex);
+        }
+    }
+
+    private static long parseLong(final String value, final String paramName)
+    {
+        try
+        {
+            return Long.parseLong(value);
+        }
+        catch (final NumberFormatException ex)
+        {
+            throw new InvalidChannelException(
+                "invalid " + paramName + ", must be a number", ex);
+        }
+    }
+
+    private static long parseResponseCorrelationId(final ChannelUri channelUri)
+    {
+        final String idStr = channelUri.get(RESPONSE_CORRELATION_ID_PARAM_NAME, "-1");
+
+        if (PROTOTYPE_CORRELATION_ID.equals(idStr))
+        {
+            return PROTOTYPE_VALUE_CORRELATION_ID;
+        }
+
+        try
+        {
+            final long value = Long.parseLong(idStr);
+
+            if (value < -1)
+            {
+                throw new NumberFormatException("responseCorrelationId must be positive");
+            }
+
+            return value;
+        }
+        catch (final NumberFormatException ex)
+        {
+            throw new InvalidChannelException("invalid " + RESPONSE_CORRELATION_ID_PARAM_NAME +
+                ", must be a number greater than or equal to -1, or '" + PROTOTYPE_CORRELATION_ID + "'", ex);
         }
     }
 

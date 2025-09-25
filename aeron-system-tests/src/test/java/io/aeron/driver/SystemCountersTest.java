@@ -16,6 +16,8 @@
 package io.aeron.driver;
 
 import io.aeron.Aeron;
+import io.aeron.CommonContext;
+import io.aeron.command.ControlProtocolEvents;
 import io.aeron.driver.status.SystemCounterDescriptor;
 import io.aeron.test.SystemTestWatcher;
 import io.aeron.test.driver.TestMediaDriver;
@@ -29,6 +31,7 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 
 import static org.hamcrest.CoreMatchers.startsWith;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class SystemCountersTest
 {
@@ -42,6 +45,7 @@ public class SystemCountersTest
     void before()
     {
         final MediaDriver.Context context = new MediaDriver.Context()
+            .aeronDirectoryName(CommonContext.generateRandomDirName())
             .dirDeleteOnStart(true)
             .dirDeleteOnShutdown(true)
             .threadingMode(ThreadingMode.SHARED);
@@ -58,7 +62,7 @@ public class SystemCountersTest
     }
 
     @Test
-    void shouldCreatePublicationUsingSparseFiles()
+    void verifySystemCounters()
     {
         final CountersReader countersReader = aeron.countersReader();
         final Int2ObjectHashMap<String> idToLabel = new Int2ObjectHashMap<>();
@@ -66,7 +70,8 @@ public class SystemCountersTest
         {
             if (SystemCounterDescriptor.SYSTEM_COUNTER_TYPE_ID == typeId)
             {
-                idToLabel.put(keyBuffer.getInt(0), label);
+                assertEquals(counterId, keyBuffer.getInt(0));
+                idToLabel.put(counterId, label);
             }
         });
 
@@ -74,6 +79,16 @@ public class SystemCountersTest
         {
             final String counterLabel = idToLabel.get(counter.id());
             assertThat(counterLabel, startsWith(counter.label()));
+            assertEquals(counter.id(), countersReader.getCounterRegistrationId(counter.id()));
+            assertEquals(Aeron.NULL_VALUE, countersReader.getCounterOwnerId(counter.id()));
         }
+    }
+
+    @Test
+    void controlProtocolVersion()
+    {
+        assertEquals(
+            ControlProtocolEvents.CONTROL_PROTOCOL_SEMANTIC_VERSION,
+            aeron.countersReader().getCounterValue(SystemCounterDescriptor.CONTROL_PROTOCOL_VERSION.id()));
     }
 }

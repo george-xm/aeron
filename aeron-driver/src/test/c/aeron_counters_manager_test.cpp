@@ -16,6 +16,7 @@
 
 #include <array>
 #include <cstdint>
+#include <thread>
 
 #include <gtest/gtest.h>
 
@@ -83,6 +84,36 @@ void func_should_never_be_called(
     void *clientd)
 {
     FAIL();
+}
+
+static void test_concurrent_aeron_counter_increment(
+    int num_threads, size_t iterations, std::atomic<int>& started_threads, int64_t *addr)
+{
+    started_threads++;
+    while (started_threads < num_threads)
+    {
+        std::this_thread::yield();
+    }
+
+    for (size_t j = 0; j < iterations; j++)
+    {
+        aeron_counter_increment(addr);
+    }
+}
+
+static void test_concurrent_aeron_counter_get_and_add(
+    int num_threads, size_t iterations, std::atomic<int>& started_threads, int64_t *addr, int64_t value)
+{
+    started_threads++;
+    while (started_threads < num_threads)
+    {
+        std::this_thread::yield();
+    }
+
+    for (size_t j = 0; j < iterations; j++)
+    {
+        aeron_counter_get_and_add(addr, value);
+    }
 }
 
 TEST_F(CountersManagerTest, shouldNotIterateOverEmptyCounters)
@@ -208,15 +239,194 @@ TEST_F(CountersManagerTest, shouldStoreAndLoadCounterValue)
 {
     ASSERT_EQ(counters_manager_init(), 0);
 
-    int32_t id;
-
-    ASSERT_GE((id = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3)), 0);
+    int32_t id = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3);
+    ASSERT_GE(id, 0);
 
     const int64_t value = 7L;
     int64_t *addr = aeron_counters_manager_addr(&m_manager, id);
 
-    aeron_counter_set_ordered(addr, value);
-    EXPECT_EQ(aeron_counter_get(addr), value);
+    aeron_counter_set_release(addr, value);
+    EXPECT_EQ(aeron_counter_get_plain(addr), value);
+    EXPECT_EQ(aeron_counter_get_acquire(addr), value);
+}
+
+TEST_F(CountersManagerTest, shouldIncrementValueWithVolatileSemantics)
+{
+    ASSERT_EQ(counters_manager_init(), 0);
+
+    int32_t id = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3);
+    ASSERT_GE(id, 0);
+
+    int64_t *addr = aeron_counters_manager_addr(&m_manager, id);
+
+    int64_t initial_value = 1010101010101;
+    aeron_counter_set_release(addr, initial_value);
+    EXPECT_EQ(aeron_counter_get_plain(addr), initial_value);
+
+    const int num_threads = 3;
+    const size_t iterations = 777777;
+    std::vector<std::thread> threads;
+    std::atomic<int> started_threads(0);
+    for (int i = 0; i < num_threads; i++)
+    {
+        std::thread x(test_concurrent_aeron_counter_increment, num_threads, iterations, std::ref(started_threads), addr);
+        threads.push_back(std::move(x));
+    }
+
+    for (int i = 0; i < num_threads; i++)
+    {
+        threads[i].join();
+    }
+
+    EXPECT_EQ(aeron_counter_get_plain(addr), initial_value + (num_threads * iterations));
+}
+
+TEST_F(CountersManagerTest, shouldIncrementValueWithReleaseSemantics)
+{
+    ASSERT_EQ(counters_manager_init(), 0);
+
+    int32_t id = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3);
+    ASSERT_GE(id, 0);
+
+    int64_t *addr = aeron_counters_manager_addr(&m_manager, id);
+
+    EXPECT_EQ(aeron_counter_get_plain(addr), 0);
+
+    EXPECT_EQ(aeron_counter_increment_release(addr), 0);
+    EXPECT_EQ(aeron_counter_get_plain(addr), 1);
+
+    EXPECT_EQ(aeron_counter_increment_release(addr), 1);
+    EXPECT_EQ(aeron_counter_get_plain(addr), 2);
+}
+
+TEST_F(CountersManagerTest, shouldIncrementValueWithPlainSemantics)
+{
+    ASSERT_EQ(counters_manager_init(), 0);
+
+    int32_t id = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3);
+    ASSERT_GE(id, 0);
+
+    int64_t *addr = aeron_counters_manager_addr(&m_manager, id);
+
+    EXPECT_EQ(aeron_counter_get_plain(addr), 0);
+
+    EXPECT_EQ(aeron_counter_increment_plain(addr), 0);
+    EXPECT_EQ(aeron_counter_get_plain(addr), 1);
+
+    EXPECT_EQ(aeron_counter_increment_plain(addr), 1);
+    EXPECT_EQ(aeron_counter_get_plain(addr), 2);
+}
+
+TEST_F(CountersManagerTest, shouldGetAndAddValueWithVolatileSemantics)
+{
+    ASSERT_EQ(counters_manager_init(), 0);
+
+    int32_t id = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3);
+    ASSERT_GE(id, 0);
+
+    int64_t *addr = aeron_counters_manager_addr(&m_manager, id);
+
+    int64_t initial_value = 567;
+    aeron_counter_set_release(addr, initial_value);
+    EXPECT_EQ(aeron_counter_get_plain(addr), initial_value);
+
+    const int num_threads = 2;
+    const size_t iterations = 777777;
+    std::atomic<int> started_threads(0);
+
+    const int64_t v1 = 19, v2 = 64;
+    std::thread t1(test_concurrent_aeron_counter_get_and_add, num_threads, iterations, std::ref(started_threads), addr, v1);
+    std::thread t2(test_concurrent_aeron_counter_get_and_add, num_threads, iterations, std::ref(started_threads), addr, v2);
+
+    t1.join();
+    t2.join();
+
+    EXPECT_EQ(aeron_counter_get_plain(addr), initial_value + iterations * v1 + iterations * v2);
+}
+
+TEST_F(CountersManagerTest, shouldGetAndAddValueWithReleaseSemantics)
+{
+    ASSERT_EQ(counters_manager_init(), 0);
+
+    int32_t id = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3);
+    ASSERT_GE(id, 0);
+
+    int64_t *addr = aeron_counters_manager_addr(&m_manager, id);
+
+    EXPECT_EQ(aeron_counter_get_plain(addr), 0);
+
+    EXPECT_EQ(aeron_counter_get_and_add_release(addr, 5), 0);
+    EXPECT_EQ(aeron_counter_get_plain(addr), 5);
+
+    EXPECT_EQ(aeron_counter_get_and_add_release(addr, -2), 5);
+    EXPECT_EQ(aeron_counter_get_plain(addr), 3);
+
+    EXPECT_EQ(aeron_counter_get_and_add_release(addr, 10), 3);
+    EXPECT_EQ(aeron_counter_get_plain(addr), 13);
+}
+
+TEST_F(CountersManagerTest, shouldGetAndAddValueWithPlainSemantics)
+{
+    ASSERT_EQ(counters_manager_init(), 0);
+
+    int32_t id = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3);
+    ASSERT_GE(id, 0);
+
+    int64_t *addr = aeron_counters_manager_addr(&m_manager, id);
+
+    EXPECT_EQ(aeron_counter_get_plain(addr), 0);
+
+    EXPECT_EQ(aeron_counter_get_and_add_plain(addr, 5), 0);
+    EXPECT_EQ(aeron_counter_get_plain(addr), 5);
+
+    EXPECT_EQ(aeron_counter_get_and_add_plain(addr, -2), 5);
+    EXPECT_EQ(aeron_counter_get_plain(addr), 3);
+
+    EXPECT_EQ(aeron_counter_get_and_add_plain(addr, 10), 3);
+    EXPECT_EQ(aeron_counter_get_plain(addr), 13);
+}
+
+TEST_F(CountersManagerTest, shouldProposeMaxValueWithReleaseSemantics)
+{
+    ASSERT_EQ(counters_manager_init(), 0);
+
+    int32_t id = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3);
+    ASSERT_GE(id, 0);
+
+    int64_t *addr = aeron_counters_manager_addr(&m_manager, id);
+
+    EXPECT_EQ(aeron_counter_get_plain(addr), 0);
+
+    EXPECT_TRUE(aeron_counter_propose_max_release(addr, 5));
+    EXPECT_EQ(aeron_counter_get_plain(addr), 5);
+
+    EXPECT_FALSE(aeron_counter_propose_max_release(addr, 5));
+    EXPECT_EQ(aeron_counter_get_plain(addr), 5);
+
+    EXPECT_FALSE(aeron_counter_propose_max_release(addr, -1));
+    EXPECT_EQ(aeron_counter_get_plain(addr), 5);
+
+    EXPECT_TRUE(aeron_counter_propose_max_release(addr, 100));
+    EXPECT_EQ(aeron_counter_get_plain(addr), 100);
+}
+
+TEST_F(CountersManagerTest, shouldProposeMaxValueWithPlainSemantics)
+{
+    ASSERT_EQ(counters_manager_init(), 0);
+
+    int32_t id = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3);
+    ASSERT_GE(id, 0);
+
+    int64_t *addr = aeron_counters_manager_addr(&m_manager, id);
+
+    EXPECT_TRUE(aeron_counter_propose_max_plain(addr, 111));
+    EXPECT_EQ(aeron_counter_get_plain(addr), 111);
+
+    EXPECT_FALSE(aeron_counter_propose_max_plain(addr, 0));
+    EXPECT_EQ(aeron_counter_get_plain(addr), 111);
+
+    EXPECT_TRUE(aeron_counter_propose_max_plain(addr, 1000));
+    EXPECT_EQ(aeron_counter_get_plain(addr), 1000);
 }
 
 struct metadata_test_stct

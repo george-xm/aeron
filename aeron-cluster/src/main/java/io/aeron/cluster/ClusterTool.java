@@ -23,7 +23,9 @@ import static org.agrona.SystemUtil.getDurationInNanos;
 import java.io.File;
 import java.io.PrintStream;
 import java.util.Map;
+import java.util.function.BiConsumer;
 
+import io.aeron.Image;
 import org.agrona.SystemUtil;
 import org.agrona.collections.Object2ObjectHashMap;
 
@@ -44,7 +46,7 @@ import io.aeron.config.DefaultType;
  *               sort-recording-log: reorders entries in the recording log to match the order in memory.
  * seed-recording-log-from-snapshot: creates a new recording log based on the latest valid snapshot.
  *                           errors: prints Aeron and cluster component error logs.
- *                     list-members: prints leader memberId, active members and passive members lists.
+ *                     list-members: prints leader memberId and active members.
  *                     backup-query: [delay] get, or set, time of next backup query.
  *       invalidate-latest-snapshot: marks the latest snapshot as a invalid so the previous is loaded.
  *                         snapshot: triggers a snapshot on the leader.
@@ -166,7 +168,7 @@ public class ClusterTool
 
         COMMANDS.put("list-members", new ClusterToolCommand(
             action(operator::listMembers),
-            "prints leader memberId, active members and passive members lists."));
+            "prints leader memberId and active members."));
 
         COMMANDS.put("backup-query", new ClusterToolCommand((clusterDir, out, args) ->
         {
@@ -214,7 +216,7 @@ public class ClusterTool
         COMMANDS.put("describe-latest-cm-snapshot", new ClusterToolCommand(
             action((clusterDir, listener) -> operator.describeLatestConsensusModuleSnapshot(
             clusterDir,
-            System.out,
+            listener,
             null)),
             "prints the contents of the latest valid consensus module snapshot."));
     }
@@ -241,6 +243,7 @@ public class ClusterTool
             printHelp(COMMANDS, HELP_PREFIX);
             System.exit(-1);
         }
+
         final ClusterToolCommand command = COMMANDS.get(args[1]);
         if (null == command)
         {
@@ -250,7 +253,11 @@ public class ClusterTool
         }
         else
         {
-            command.action().act(clusterDir, System.out, args);
+            final int status = command.action().act(clusterDir, System.out, args);
+            if (SUCCESS != status)
+            {
+                System.exit(status);
+            }
         }
     }
 
@@ -511,6 +518,22 @@ public class ClusterTool
      * @return <code>true</code> if the snapshot was successfully described <code>false</code> otherwise.
      */
     public static boolean describeLatestConsensusModuleSnapshot(final PrintStream out, final File clusterDir)
+    {
+        return BACKWARD_COMPATIBLE_OPERATIONS.describeLatestConsensusModuleSnapshot(clusterDir, out, null) == SUCCESS;
+    }
+
+    /**
+     * Print out a summary of the state captured in the latest consensus module snapshot.
+     *
+     * @param out                         to print the operation result.
+     * @param clusterDir                  where the cluster is running.
+     * @param postConsensusImageDescriber describe the data after the snapshot used for extensions.
+     * @return <code>true</code> if the snapshot was successfully described <code>false</code> otherwise.
+     */
+    public static boolean describeLatestConsensusModuleSnapshot(
+        final PrintStream out,
+        final File clusterDir,
+        final BiConsumer<Image, Aeron> postConsensusImageDescriber)
     {
         return BACKWARD_COMPATIBLE_OPERATIONS.describeLatestConsensusModuleSnapshot(clusterDir, out, null) == SUCCESS;
     }

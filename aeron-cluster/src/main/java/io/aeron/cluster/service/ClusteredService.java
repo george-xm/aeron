@@ -130,14 +130,14 @@ public interface ClusteredService
      * @param appVersion          for the application configured in the consensus module.
      */
     default void onNewLeadershipTermEvent(
-        long leadershipTermId,
-        long logPosition,
-        long timestamp,
-        long termBaseLogPosition,
-        int leaderMemberId,
-        int logSessionId,
-        TimeUnit timeUnit,
-        int appVersion)
+        final long leadershipTermId,
+        final long logPosition,
+        final long timestamp,
+        final long termBaseLogPosition,
+        final int leaderMemberId,
+        final int logSessionId,
+        final TimeUnit timeUnit,
+        final int appVersion)
     {
     }
 

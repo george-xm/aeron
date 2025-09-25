@@ -23,8 +23,25 @@ import io.aeron.exceptions.ConfigurationException;
 import io.aeron.exceptions.DriverTimeoutException;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.version.Versioned;
-import org.agrona.*;
-import org.agrona.concurrent.*;
+import org.agrona.BufferUtil;
+import org.agrona.CloseHelper;
+import org.agrona.DirectBuffer;
+import org.agrona.ErrorHandler;
+import org.agrona.ExpandableArrayBuffer;
+import org.agrona.Strings;
+import org.agrona.concurrent.AgentInvoker;
+import org.agrona.concurrent.AgentRunner;
+import org.agrona.concurrent.AtomicBuffer;
+import org.agrona.concurrent.BusySpinIdleStrategy;
+import org.agrona.concurrent.CountedErrorHandler;
+import org.agrona.concurrent.EpochClock;
+import org.agrona.concurrent.IdleStrategy;
+import org.agrona.concurrent.NanoClock;
+import org.agrona.concurrent.NoOpLock;
+import org.agrona.concurrent.SleepingMillisIdleStrategy;
+import org.agrona.concurrent.SystemEpochClock;
+import org.agrona.concurrent.SystemNanoClock;
+import org.agrona.concurrent.YieldingIdleStrategy;
 import org.agrona.concurrent.broadcast.BroadcastReceiver;
 import org.agrona.concurrent.broadcast.CopyBroadcastReceiver;
 import org.agrona.concurrent.ringbuffer.ManyToOneRingBuffer;
@@ -32,15 +49,10 @@ import org.agrona.concurrent.ringbuffer.RingBuffer;
 import org.agrona.concurrent.status.CountersReader;
 
 import java.io.File;
-import java.io.IOException;
 import java.io.PrintStream;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
-import java.nio.MappedByteBuffer;
-import java.nio.channels.FileChannel;
-import java.nio.file.AccessDeniedException;
-import java.nio.file.FileSystemException;
-import java.nio.file.NoSuchFileException;
+import java.nio.ByteBuffer;
 import java.util.Objects;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
@@ -48,9 +60,6 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
 import static io.aeron.Aeron.Configuration.MAX_CLIENT_NAME_LENGTH;
-import static java.nio.channels.FileChannel.MapMode.READ_WRITE;
-import static java.nio.file.StandardOpenOption.READ;
-import static java.nio.file.StandardOpenOption.WRITE;
 import static org.agrona.SystemUtil.getDurationInNanos;
 import static org.agrona.SystemUtil.getProperty;
 
@@ -65,7 +74,7 @@ import static org.agrona.SystemUtil.getProperty;
  * See {@link Aeron.Configuration#DEFAULT_ERROR_HANDLER}.
  */
 @Versioned
-public class Aeron implements AutoCloseable
+public final class Aeron implements AutoCloseable
 {
     /**
      * Used to represent a null value for when some value is not yet set.
@@ -73,6 +82,7 @@ public class Aeron implements AutoCloseable
     public static final int NULL_VALUE = -1;
 
     private static final VarHandle IS_CLOSED_VH;
+
     static
     {
         try
@@ -333,7 +343,7 @@ public class Aeron implements AutoCloseable
     /**
      * Asynchronously remove a {@link Publication}.
      *
-     * @param registrationId to be of the publication removed.
+     * @param registrationId of the publication to be removed.
      * @see #asyncAddPublication(String, int)
      * @see #asyncAddExclusivePublication(String, int)
      */
@@ -471,14 +481,14 @@ public class Aeron implements AutoCloseable
     }
 
     /**
-     * Generate the next correlation id that is unique for the connected Media Driver.
+     * Generate the next correlation id that is unique for the connected media driver.
      * <p>
      * This is useful generating correlation identifiers for pairing requests with responses in a clients own
      * application protocol.
      * <p>
      * This method is thread safe and will work across processes that all use the same media driver.
      *
-     * @return next correlation id that is unique for the Media Driver.
+     * @return next correlation id that is unique for the media driver.
      */
     public long nextCorrelationId()
     {
@@ -488,6 +498,28 @@ public class Aeron implements AutoCloseable
         }
 
         return commandBuffer.nextCorrelationId();
+    }
+
+    /**
+     * Get next available session id from the media driver. The session id will be unique for the connected media
+     * driver and given {@code streamId}.
+     * <p>
+     * If media driver's version is 1.49.0 or higher, then the session id is returned by the media driver. Otherwise,
+     * a random session id is generated.
+     *
+     * @param streamId for which a new session id is requested. Media driver only checks for session clashes at the
+     *                 stream level.
+     * @return next available session id that is unique for the media driver and given {@code streamId}.
+     * @since 1.49.0
+     */
+    public int nextSessionId(final int streamId)
+    {
+        if (isClosed)
+        {
+            throw new AeronException("client is closed");
+        }
+
+        return conductor.nextSessionId(streamId);
     }
 
     /**
@@ -509,6 +541,8 @@ public class Aeron implements AutoCloseable
      * Allocate a counter on the media driver and return a {@link Counter} for it.
      * <p>
      * The counter should be freed by calling {@link Counter#close()}.
+     * <p>
+     * The typeId should be 1000 or greater. Values lower than that are reserved for use by Aeron.
      *
      * @param typeId      for the counter.
      * @param keyBuffer   containing the optional key for the counter.
@@ -536,6 +570,8 @@ public class Aeron implements AutoCloseable
      * Allocate a counter on the media driver and return a {@link Counter} for it.
      * <p>
      * The counter should be freed by calling {@link Counter#close()}.
+     * <p>
+     * The typeId should be 1000 or greater. Values lower than that are reserved for use by Aeron.
      *
      * @param typeId for the counter.
      * @param label  for the counter. It should be US-ASCII.
@@ -547,14 +583,15 @@ public class Aeron implements AutoCloseable
         return conductor.addCounter(typeId, label);
     }
 
-
     /**
      * Allocates or returns an existing static counter instance using specified {@code typeId} and
-     * {@code registrationId} pair. Such counter cannot be deleted and its lifecycle is decoupled from this
+     * {@code registrationId} pair. Such a counter cannot be deleted and its lifecycle is decoupled from this
      * {@link Aeron} instance, i.e. won't be closed when this instance is closed or times out.
      * <p>
      * <em><strong>Note:</strong> calling {@link Counter#close()} will only close the counter instance itself but will
      * not free the counter in the CnC file.</em>
+     * <p>
+     * The typeId should be 1000 or greater. Values lower than that are reserved for use by Aeron.
      *
      * @param typeId         for the counter.
      * @param keyBuffer      containing the optional key for the counter.
@@ -584,11 +621,13 @@ public class Aeron implements AutoCloseable
 
     /**
      * Allocates or returns an existing static counter instance using specified {@code typeId} and
-     * {@code registrationId} pair. Such counter cannot be deleted and its lifecycle is decoupled from this
+     * {@code registrationId} pair. Such a counter cannot be deleted and its lifecycle is decoupled from this
      * {@link Aeron} instance, i.e. won't be closed when this instance is closed or times out.
      * <p>
      * <em><strong>Note:</strong> calling {@link Counter#close()} will only close the counter instance itself but will
      * not free the counter in the CnC file.</em>
+     * <p>
+     * The typeId should be 1000 or greater. Values lower than that are reserved for use by Aeron.
      *
      * @param typeId         for the counter.
      * @param label          for the counter. It should be US-ASCII.
@@ -600,6 +639,146 @@ public class Aeron implements AutoCloseable
     public Counter addStaticCounter(final int typeId, final String label, final long registrationId)
     {
         return conductor.addStaticCounter(typeId, label, registrationId);
+    }
+
+    /**
+     * Asynchronously allocate a counter on the media driver.
+     * <p>
+     * The typeId should be 1000 or greater. Values lower than that are reserved for use by Aeron.
+     *
+     * @param typeId for the counter.
+     * @param label  for the counter. It should be US-ASCII.
+     * @return the registration id of the counter which can be used to get it by calling {@link #getCounter(long)}
+     * method.
+     * @see #getCounter(long)
+     * @since 1.49.0
+     */
+    public long asyncAddCounter(final int typeId, final String label)
+    {
+        return conductor.asyncAddCounter(typeId, label);
+    }
+
+    /**
+     * Asynchronously allocate a counter on the media driver.
+     * <p>
+     * The typeId should be 1000 or greater. Values lower than that are reserved for use by Aeron.
+     *
+     * @param typeId      for the counter.
+     * @param keyBuffer   containing the optional key for the counter.
+     * @param keyOffset   within the keyBuffer at which the key begins.
+     * @param keyLength   of the key in the keyBuffer.
+     * @param labelBuffer containing the mandatory label for the counter. The label should not be length prefixed.
+     * @param labelOffset within the labelBuffer at which the label begins.
+     * @param labelLength of the label in the labelBuffer.
+     * @return the registration id of the counter which can be used to get it by calling {@link #getCounter(long)}
+     * method.
+     * @see #getCounter(long)
+     * @since 1.49.0
+     */
+    public long asyncAddCounter(
+        final int typeId,
+        final DirectBuffer keyBuffer,
+        final int keyOffset,
+        final int keyLength,
+        final DirectBuffer labelBuffer,
+        final int labelOffset,
+        final int labelLength)
+    {
+        return conductor.asyncAddCounter(
+            typeId, keyBuffer, keyOffset, keyLength, labelBuffer, labelOffset, labelLength);
+    }
+
+    /**
+     * Asynchronously allocates or returns an existing static counter instance using specified {@code typeId} and
+     * {@code registrationId} pair. Such a counter cannot be deleted and its lifecycle is decoupled from this
+     * {@link Aeron} instance, i.e. won't be closed when this instance is closed or times out.
+     * <p>
+     * <em><strong>Note:</strong> calling {@link Counter#close()} will only close the counter instance itself but will
+     * not free the counter in the CnC file.</em>
+     * <p>
+     * The typeId should be 1000 or greater. Values lower than that are reserved for use by Aeron.
+     *
+     * @param typeId         for the counter.
+     * @param label          for the counter. It should be US-ASCII.
+     * @param registrationId that uniquely identifies the static counter for a given {@code typeId}.
+     * @return the correlation id of the command which can be used to get the counter by calling
+     * {@link #getCounter(long)} method.
+     * @see #getCounter(long)
+     * @since 1.49.0
+     */
+    public long asyncAddStaticCounter(final int typeId, final String label, final long registrationId)
+    {
+        return conductor.asyncAddStaticCounter(typeId, label, registrationId);
+    }
+
+    /**
+     * Asynchronously allocates or returns an existing static counter instance using specified {@code typeId} and
+     * {@code registrationId} pair. Such a counter cannot be deleted and its lifecycle is decoupled from this
+     * {@link Aeron} instance, i.e. won't be closed when this instance is closed or times out.
+     * <p>
+     * <em><strong>Note:</strong> calling {@link Counter#close()} will only close the counter instance itself but will
+     * not free the counter in the CnC file.</em>
+     * <p>
+     * The typeId should be 1000 or greater. Values lower than that are reserved for use by Aeron.
+     *
+     * @param typeId         for the counter.
+     * @param keyBuffer      containing the optional key for the counter.
+     * @param keyOffset      within the keyBuffer at which the key begins.
+     * @param keyLength      of the key in the keyBuffer.
+     * @param labelBuffer    containing the mandatory label for the counter. The label should not be length prefixed.
+     * @param labelOffset    within the labelBuffer at which the label begins.
+     * @param labelLength    of the label in the labelBuffer.
+     * @param registrationId that uniquely identifies the static counter for a given {@code typeId}.
+     * @return the correlation id of the command which can be used to get the counter by calling
+     * {@link #getCounter(long)} method.
+     * @see #getCounter(long)
+     * @since 1.49.0
+     */
+    public long asyncAddStaticCounter(
+        final int typeId,
+        final DirectBuffer keyBuffer,
+        final int keyOffset,
+        final int keyLength,
+        final DirectBuffer labelBuffer,
+        final int labelOffset,
+        final int labelLength,
+        final long registrationId)
+    {
+        return conductor.asyncAddStaticCounter(
+            typeId, keyBuffer, keyOffset, keyLength, labelBuffer, labelOffset, labelLength, registrationId);
+    }
+
+    /**
+     * Get a {@link Counter} that was created asynchronously.
+     *
+     * @param correlationId returned from one of the async methods:
+     *                      {@link #asyncAddCounter(int, String)},
+     *                      {@link #asyncAddCounter(int, DirectBuffer, int, int, DirectBuffer, int, int)},
+     *                      {@link #asyncAddStaticCounter(int, String, long)} or
+     *                      {@link #asyncAddStaticCounter(int, DirectBuffer, int, int, DirectBuffer, int, int, long)}.
+     * @return a new {@link Counter} when available, otherwise {@code null}.
+     * @see #asyncAddCounter(int, String)
+     * @see #asyncAddCounter(int, DirectBuffer, int, int, DirectBuffer, int, int)
+     * @see #asyncAddStaticCounter(int, String, long)
+     * @see #asyncAddStaticCounter(int, DirectBuffer, int, int, DirectBuffer, int, int, long)
+     * @since 1.49.0
+     */
+    public Counter getCounter(final long correlationId)
+    {
+        return conductor.getCounter(correlationId);
+    }
+
+    /**
+     * Asynchronously remove a {@link Counter}.
+     *
+     * @param registrationId of the counter to be removed.
+     * @see #asyncAddCounter(int, String)
+     * @see #asyncAddCounter(int, DirectBuffer, int, int, DirectBuffer, int, int)
+     * @since 1.49.0
+     */
+    public void asyncRemoveCounter(final long registrationId)
+    {
+        conductor.asyncRemoveCounter(registrationId);
     }
 
     /**
@@ -942,7 +1121,7 @@ public class Aeron implements AutoCloseable
         private CopyBroadcastReceiver toClientBuffer;
         private RingBuffer toDriverBuffer;
         private DriverProxy driverProxy;
-        private MappedByteBuffer cncByteBuffer;
+        private ByteBuffer cncByteBuffer;
         private AtomicBuffer cncMetaDataBuffer;
         private LogBuffersFactory logBuffersFactory;
         private ErrorHandler errorHandler;
@@ -954,10 +1133,11 @@ public class Aeron implements AutoCloseable
         private PublicationErrorFrameHandler publicationErrorFrameHandler = PublicationErrorFrameHandler.NO_OP;
         private Runnable closeHandler;
         private long keepAliveIntervalNs = Configuration.KEEPALIVE_INTERVAL_NS;
-        private long interServiceTimeoutNs = 0;
+        private long interServiceTimeoutNs;
         private long idleSleepDurationNs = Configuration.idleSleepDurationNs();
         private long resourceLingerDurationNs = Configuration.resourceLingerDurationNs();
         private long closeLingerDurationNs = Configuration.closeLingerDurationNs();
+        private int filePageSize;
 
         private ThreadFactory threadFactory = Thread::new;
 
@@ -989,14 +1169,21 @@ public class Aeron implements AutoCloseable
             }
             else if (clientLock instanceof NoOpLock && !useConductorAgentInvoker)
             {
-                throw new AeronException(
+                throw new ConfigurationException(
                     "Must use Aeron.Context.useConductorAgentInvoker(true) when Aeron.Context.clientLock(...) " +
                     "is using a NoOpLock");
             }
 
-            if (null != clientName && clientName.length() > MAX_CLIENT_NAME_LENGTH)
+            if (null != driverAgentInvoker && !useConductorAgentInvoker)
             {
-                throw new AeronException("clientName length must <= " + MAX_CLIENT_NAME_LENGTH);
+                throw new ConfigurationException(
+                    "Must use Aeron.Context.useConductorAgentInvoker(true) when Aeron.Context.driverAgentInvoker() " +
+                    "is set");
+            }
+
+            if (clientName.length() > MAX_CLIENT_NAME_LENGTH)
+            {
+                throw new ConfigurationException("clientName length must <= " + MAX_CLIENT_NAME_LENGTH);
             }
 
             if (null == epochClock)
@@ -1024,10 +1211,8 @@ public class Aeron implements AutoCloseable
                 awaitingIdleStrategy = new SleepingMillisIdleStrategy(Configuration.AWAITING_IDLE_SLEEP_MS);
             }
 
-            if (cncFile() != null)
-            {
-                connectToDriver();
-            }
+            connectToDriver();
+            filePageSize = driverFilePageSize(cncMetaDataBuffer);
 
             interServiceTimeoutNs = CncFileDescriptor.clientLivenessTimeoutNs(cncMetaDataBuffer);
             if (interServiceTimeoutNs <= keepAliveIntervalNs)
@@ -1768,6 +1953,17 @@ public class Aeron implements AutoCloseable
         }
 
         /**
+         * Get file page size from running media driver.
+         *
+         * @return file page size or zero (if not connected to the media driver).
+         * @since 1.48.0
+         */
+        public int filePageSize()
+        {
+            return filePageSize;
+        }
+
+        /**
          * Clean up all resources that the client uses to communicate with the Media Driver.
          */
         public void close()
@@ -1830,27 +2026,8 @@ public class Aeron implements AutoCloseable
 
             while (null == toDriverBuffer)
             {
-                cncByteBuffer = waitForFileMapping(cncFile, clock, deadlineMs);
-                cncMetaDataBuffer = CncFileDescriptor.createMetaDataBuffer(cncByteBuffer);
-
-                int cncVersion;
-                while (0 == (cncVersion = cncMetaDataBuffer.getIntVolatile(CncFileDescriptor.cncVersionOffset(0))))
-                {
-                    if (clock.time() > deadlineMs)
-                    {
-                        throw new DriverTimeoutException("CnC file is created but not initialised: " +
-                            cncFile.getAbsolutePath());
-                    }
-
-                    sleep(Configuration.AWAITING_IDLE_SLEEP_MS);
-                }
-
-                CncFileDescriptor.checkVersion(cncVersion);
-                if (SemanticVersion.minor(cncVersion) < SemanticVersion.minor(CncFileDescriptor.CNC_VERSION))
-                {
-                    throw new AeronException("driverVersion=" + SemanticVersion.toString(cncVersion) +
-                        " insufficient for clientVersion=" + SemanticVersion.toString(CncFileDescriptor.CNC_VERSION));
-                }
+                cncMetaDataBuffer = awaitCncFileCreation(cncFile, clock, deadlineMs);
+                cncByteBuffer = cncMetaDataBuffer.byteBuffer();
 
                 if (!CncFileDescriptor.isCncFileLengthSufficient(cncMetaDataBuffer, cncByteBuffer.capacity()))
                 {
@@ -1893,69 +2070,6 @@ public class Aeron implements AutoCloseable
 
                 toDriverBuffer = ringBuffer;
             }
-        }
-
-        @SuppressWarnings("try")
-        private static MappedByteBuffer waitForFileMapping(
-            final File file, final EpochClock clock, final long deadlineMs)
-        {
-            while (true)
-            {
-                while (!file.exists() || file.length() < CncFileDescriptor.META_DATA_LENGTH)
-                {
-                    if (clock.time() > deadlineMs)
-                    {
-                        throw new DriverTimeoutException("CnC file not created: " + file.getAbsolutePath());
-                    }
-
-                    sleep(Configuration.IDLE_SLEEP_DEFAULT_MS);
-                }
-
-                try (FileChannel fileChannel = FileChannel.open(file.toPath(), READ, WRITE))
-                {
-                    final long fileSize = fileChannel.size();
-                    if (fileSize < CncFileDescriptor.META_DATA_LENGTH)
-                    {
-                        if (clock.time() > deadlineMs)
-                        {
-                            throw new DriverTimeoutException(
-                                "CnC file is created but not populated: " + file.getAbsolutePath());
-                        }
-
-                        fileChannel.close();
-                        sleep(Configuration.IDLE_SLEEP_DEFAULT_MS);
-                        continue;
-                    }
-
-                    return fileChannel.map(READ_WRITE, 0, fileSize);
-                }
-                catch (final NoSuchFileException | AccessDeniedException ignore)
-                {
-                }
-                catch (final FileSystemException ex)
-                {
-                    // JDK exception translation does not handle `ERROR_SHARING_VIOLATION (32)` and returns
-                    // FileSystemException with the error "The process cannot access the file because it is being
-                    // used by another process.". Our current thinking is that matching by text is too brittle due
-                    // to error message being locale-sensitive on Windows. Therefore, we are going to retry on any
-                    // FileSystemException when running on Windows.
-                    if (SystemUtil.isWindows())
-                    {
-                        continue;
-                    }
-
-                    throw new AeronException(cncFileErrorMessage(file, ex), ex);
-                }
-                catch (final IOException ex)
-                {
-                    throw new AeronException(cncFileErrorMessage(file, ex), ex);
-                }
-            }
-        }
-
-        private static String cncFileErrorMessage(final File file, final Exception ex)
-        {
-            return "cannot open CnC file: " + file.getAbsolutePath() + " reason=" + ex;
         }
     }
 }

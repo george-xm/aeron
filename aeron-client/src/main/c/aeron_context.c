@@ -76,7 +76,7 @@ int aeron_context_init(aeron_context_t **context)
         goto error;
     }
 
-    _context->client_name = NULL;
+    _context->client_name[0] = '\0';
     _context->error_handler = aeron_default_error_handler;
     _context->error_handler_clientd = NULL;
     _context->error_frame_handler = aeron_default_error_frame_handler;
@@ -193,7 +193,6 @@ int aeron_context_close(aeron_context_t *context)
 
         aeron_mpsc_concurrent_array_queue_close(&context->command_queue);
 
-        aeron_free((void *)context->client_name);
         aeron_free(context->idle_strategy_state);
         aeron_free(context);
     }
@@ -239,13 +238,14 @@ int aeron_context_set_client_name(aeron_context_t *context, const char *value)
         return -1;
     }
 
-    context->client_name = aeron_strndup(value, copy_length);
+    memcpy(context->client_name, value, copy_length);
+    context->client_name[copy_length] = '\0';
     return 0;
 }
 
 const char *aeron_context_get_client_name(aeron_context_t *context)
 {
-    return NULL != context && context->client_name ? context->client_name : "";
+    return NULL != context ? context->client_name : "";
 }
 
 int aeron_context_set_driver_timeout_ms(aeron_context_t *context, uint64_t value)

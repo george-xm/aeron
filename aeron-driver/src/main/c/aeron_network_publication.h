@@ -65,6 +65,7 @@ typedef struct aeron_network_publication_stct
     aeron_position_t snd_pos_position;
     aeron_position_t snd_lmt_position;
     aeron_atomic_counter_t snd_bpe_counter;
+    aeron_atomic_counter_t snd_naks_received_counter;
     aeron_retransmit_handler_t retransmit_handler;
     aeron_logbuffer_metadata_t *log_meta_data;
     aeron_send_channel_endpoint_t *endpoint;
@@ -90,6 +91,7 @@ typedef struct aeron_network_publication_stct
     int64_t unblock_timeout_ns;
     int64_t connection_timeout_ns;
     int64_t untethered_window_limit_timeout_ns;
+    int64_t untethered_linger_timeout_ns;
     int64_t untethered_resting_timeout_ns;
 
     int64_t tag;
@@ -121,6 +123,7 @@ typedef struct aeron_network_publication_stct
     {
         aeron_untethered_subscription_state_change_func_t untethered_subscription_state_change;
         aeron_driver_resend_func_t resend;
+        aeron_driver_publication_revoke_func_t publication_revoke;
     } log;
 
     volatile int64_t *short_sends_counter;
@@ -129,6 +132,7 @@ typedef struct aeron_network_publication_stct
     volatile int64_t *retransmits_sent_counter;
     volatile int64_t *retransmitted_bytes_counter;
     volatile int64_t *unblocked_publications_counter;
+    volatile int64_t *publications_revoked_counter;
     volatile int64_t *mapped_bytes_counter;
 
     aeron_int64_counter_map_t receiver_liveness_tracker;
@@ -148,6 +152,7 @@ int aeron_network_publication_create(
     aeron_position_t *snd_pos_position,
     aeron_position_t *snd_lmt_position,
     aeron_atomic_counter_t *snd_bpe_counter,
+    aeron_atomic_counter_t *snd_naks_received_counter,
     aeron_flow_control_strategy_t *flow_control_strategy,
     aeron_driver_uri_publication_params_t *params,
     bool is_exclusive,
@@ -157,10 +162,6 @@ void aeron_network_publication_close(
     aeron_counters_manager_t *counters_manager, aeron_network_publication_t *publication);
 
 bool aeron_network_publication_free(aeron_network_publication_t *publication);
-
-void aeron_network_publication_incref(void *clientd);
-
-void aeron_network_publication_decref(void *clientd);
 
 void aeron_network_publication_on_time_event(
     aeron_driver_conductor_t *conductor, aeron_network_publication_t *publication, int64_t now_ns, int64_t now_ms);
@@ -199,27 +200,9 @@ int aeron_network_publication_update_pub_pos_and_lmt(aeron_network_publication_t
 void aeron_network_publication_check_for_blocked_publisher(
     aeron_network_publication_t *publication, int64_t now_ns, int64_t producer_position, int64_t snd_pos);
 
-inline void aeron_network_publication_add_subscriber_hook(void *clientd, volatile int64_t *value_addr)
-{
-    aeron_network_publication_t *publication = (aeron_network_publication_t *)clientd;
+void aeron_network_publication_add_subscriber_hook(void *clientd, volatile int64_t *value_addr);
 
-    AERON_SET_RELEASE(publication->has_spies, true);
-    if (publication->spies_simulate_connection)
-    {
-        AERON_SET_RELEASE(publication->log_meta_data->is_connected, 1);
-        AERON_SET_RELEASE(publication->is_connected, true);
-    }
-}
-
-inline void aeron_network_publication_remove_subscriber_hook(void *clientd, volatile int64_t *value_addr)
-{
-    aeron_network_publication_t *publication = (aeron_network_publication_t *)clientd;
-
-    if (1 == aeron_driver_subscribable_working_position_count(&publication->conductor_fields.subscribable))
-    {
-        AERON_SET_RELEASE(publication->has_spies, false);
-    }
-}
+void aeron_network_publication_remove_subscriber_hook(void *clientd, volatile int64_t *value_addr);
 
 inline bool aeron_network_publication_is_possibly_blocked(
     aeron_network_publication_t *publication, int64_t producer_position, int64_t consumer_position)
@@ -252,7 +235,7 @@ inline int64_t aeron_network_publication_producer_position(aeron_network_publica
 
 inline int64_t aeron_network_publication_join_position(aeron_network_publication_t *publication)
 {
-    return aeron_counter_get_volatile(publication->snd_pos_position.value_addr);
+    return aeron_counter_get_acquire(publication->snd_pos_position.value_addr);
 }
 
 inline void aeron_network_publication_trigger_send_setup_frame(
@@ -309,7 +292,7 @@ inline int64_t aeron_network_publication_max_spy_position(aeron_network_publicat
     for (size_t i = 0, length = publication->conductor_fields.subscribable.length; i < length; i++)
     {
         aeron_tetherable_position_t *tetherable_position = &publication->conductor_fields.subscribable.array[i];
-        int64_t spy_position = aeron_counter_get_volatile(tetherable_position->value_addr);
+        int64_t spy_position = aeron_counter_get_acquire(tetherable_position->value_addr);
 
         if (AERON_SUBSCRIPTION_TETHER_RESTING != tetherable_position->state)
         {
@@ -325,8 +308,8 @@ inline bool aeron_network_publication_is_accepting_subscriptions(aeron_network_p
     return AERON_NETWORK_PUBLICATION_STATE_ACTIVE == publication->conductor_fields.state ||
         (AERON_NETWORK_PUBLICATION_STATE_DRAINING == publication->conductor_fields.state &&
             aeron_driver_subscribable_has_working_positions(&publication->conductor_fields.subscribable) &&
-            aeron_network_publication_producer_position(publication) >
-                aeron_counter_get_volatile(publication->snd_pos_position.value_addr));
+         aeron_network_publication_producer_position(publication) >
+             aeron_counter_get_acquire(publication->snd_pos_position.value_addr));
 }
 
 inline int64_t aeron_network_publication_registration_id(aeron_network_publication_t *publication)

@@ -25,7 +25,10 @@ import io.aeron.archive.client.AeronArchive;
 import io.aeron.archive.status.RecordingPos;
 import io.aeron.cluster.ClusterMembership;
 import io.aeron.cluster.ClusterTool;
+import io.aeron.cluster.ConsensusControlState;
 import io.aeron.cluster.ConsensusModule;
+import io.aeron.cluster.ConsensusModuleControl;
+import io.aeron.cluster.ConsensusModuleExtension;
 import io.aeron.cluster.ElectionState;
 import io.aeron.cluster.client.ClusterException;
 import io.aeron.cluster.codecs.CloseReason;
@@ -37,6 +40,7 @@ import io.aeron.driver.MediaDriver;
 import io.aeron.exceptions.AeronException;
 import io.aeron.exceptions.TimeoutException;
 import io.aeron.logbuffer.BufferClaim;
+import io.aeron.logbuffer.ControlledFragmentHandler;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.Header;
 import io.aeron.test.DataCollector;
@@ -59,8 +63,10 @@ import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.IntPredicate;
+import java.util.function.Supplier;
 import java.util.zip.CRC32;
 
 import static io.aeron.Aeron.NULL_VALUE;
@@ -78,10 +84,16 @@ public final class TestNode implements AutoCloseable
     private final TestService[] services;
     private final Context context;
     private final TestMediaDriver mediaDriver;
+    private final TestConsensusModuleExtension extension;
     private boolean isClosed = false;
 
     TestNode(final Context context, final DataCollector dataCollector)
     {
+        if (0 != context.services.length && null != context.extensionSupplier)
+        {
+            throw new IllegalStateException("Cannot use extension context");
+        }
+
         this.context = context;
 
         try
@@ -99,7 +111,17 @@ public final class TestNode implements AutoCloseable
                 .aeronDirectoryName(aeronDirectoryName)
                 .isIpcIngressAllowed(true)
                 .terminationHook(ClusterTests.terminationHook(
-                context.isTerminationExpected, context.hasMemberTerminated));
+                    context.isTerminationExpected, context.hasMemberTerminated));
+
+            if (null != context.extensionSupplier)
+            {
+                extension = context.extensionSupplier.get();
+                context.consensusModuleContext.consensusModuleExtension(extension);
+            }
+            else
+            {
+                extension = null;
+            }
 
             final AeronArchive.Context archiveContext = context.consensusModuleContext.archiveContext().clone();
 
@@ -111,7 +133,12 @@ public final class TestNode implements AutoCloseable
             for (int i = 0; i < services.length; i++)
             {
                 final ClusteredServiceContainer.Context ctx = context.serviceContainerContext.clone();
+
+                final int clusterId = context.consensusModuleContext.clusterId();
+                final int memberId = context.consensusModuleContext.clusterMemberId();
+
                 ctx.aeronDirectoryName(aeronDirectoryName)
+                    .clusterId(clusterId)
                     .archiveContext(archiveContext.clone())
                     .terminationHook(ClusterTests.terminationHook(
                         context.isTerminationExpected, context.hasServiceTerminated[i]))
@@ -119,6 +146,7 @@ public final class TestNode implements AutoCloseable
                     .markFileDir(context.consensusModuleContext.markFileDir())
                     .clusteredService(services[i])
                     .snapshotDurationThresholdNs(TimeUnit.MILLISECONDS.toNanos(100))
+                    .serviceName("clustered-service-" + clusterId + "-" + memberId + "-" + i)
                     .serviceId(i);
                 containers[i] = ClusteredServiceContainer.launch(ctx);
             }
@@ -238,7 +266,7 @@ public final class TestNode implements AutoCloseable
         return ElectionState.get(consensusModule.context().electionStateCounter());
     }
 
-    ConsensusModule.State moduleState()
+    public ConsensusModule.State moduleState()
     {
         return ConsensusModule.State.get(consensusModule.context().moduleStateCounter());
     }
@@ -256,6 +284,11 @@ public final class TestNode implements AutoCloseable
 
     public long appendPosition()
     {
+        return countersReader().getCounterValue(logRecordingCounterId());
+    }
+
+    public int logRecordingCounterId()
+    {
         final long recordingId = consensusModule().context().recordingLog().findLastTermRecordingId();
         if (RecordingPos.NULL_RECORDING_ID == recordingId)
         {
@@ -270,8 +303,7 @@ public final class TestNode implements AutoCloseable
             ArchiveTool.describeRecording(System.out, archive().context().archiveDir(), recordingId);
             fail("recording not active " + recordingId);
         }
-
-        return countersReader.getCounterValue(counterId);
+        return counterId;
     }
 
     boolean isLeader()
@@ -291,12 +323,12 @@ public final class TestNode implements AutoCloseable
 
     boolean hasServiceTerminated()
     {
-        if (1 != services.length)
+        if (services.length > 1)
         {
             throw new IllegalStateException("service count expected=1 actual=" + services.length);
         }
 
-        return context.hasServiceTerminated[0].get();
+        return 0 == services.length || context.hasServiceTerminated[0].get();
     }
 
     public boolean hasMemberTerminated()
@@ -306,7 +338,12 @@ public final class TestNode implements AutoCloseable
 
     public int index()
     {
-        return services[0].index();
+        return 0 == services.length ? -1 : services[0].index();
+    }
+
+    public int memberId()
+    {
+        return consensusModule.context().clusterMemberId();
     }
 
     CountersReader countersReader()
@@ -329,7 +366,7 @@ public final class TestNode implements AutoCloseable
 
     public String hostname()
     {
-        return TestCluster.hostname(index());
+        return context.hostName;
     }
 
     public boolean allSnapshotsLoaded()
@@ -343,6 +380,30 @@ public final class TestNode implements AutoCloseable
         }
 
         return true;
+    }
+
+    public void validateExtensionLogMessageCount(final int expectedCount)
+    {
+        final Supplier<String> msg =
+            () -> "invalid extension log message count, expected=" + expectedCount +
+                " actual=" + extension.logMessageCount.get();
+
+        while (extension.logMessageCount.get() != expectedCount)
+        {
+            Tests.yieldingIdle(msg);
+        }
+    }
+
+    public void validateExtensionIngressMessageCount(final int expectedCount)
+    {
+        final Supplier<String> msg =
+            () -> "invalid extension ingress message count, expected=" + expectedCount +
+                " actual=" + extension.logMessageCount.get();
+
+        while (extension.logMessageCount.get() != expectedCount)
+        {
+            Tests.yieldingIdle(msg);
+        }
     }
 
     public static class TestService extends StubClusteredService
@@ -798,8 +859,111 @@ public final class TestNode implements AutoCloseable
         }
     }
 
+    public static class TestConsensusModuleExtension implements ConsensusModuleExtension
+    {
+        private ConsensusControlState onElectionConsensusControlState;
+        private final AtomicLong logMessageCount = new AtomicLong(0);
+        private final AtomicLong ingressMessageCount = new AtomicLong(0);
+
+        public int supportedSchemaId()
+        {
+            return 0;
+        }
+
+        public void onStart(final ConsensusModuleControl consensusModuleControl, final Image snapshotImage)
+        {
+        }
+
+        public int doWork(final long nowNs)
+        {
+            return 0;
+        }
+
+        public int slowTickWork(final long nowNs)
+        {
+            return 0;
+        }
+
+        public int consensusWork(final long nowNs)
+        {
+            return 0;
+        }
+
+        public void onElectionComplete(final ConsensusControlState consensusControlState)
+        {
+            onElectionConsensusControlState = consensusControlState;
+        }
+
+        public void onNewLeadershipTerm(final ConsensusControlState consensusControlState)
+        {
+        }
+
+        public ControlledFragmentHandler.Action onIngressExtensionMessage(
+            final int actingBlockLength,
+            final int templateId,
+            final int schemaId,
+            final int actingVersion,
+            final DirectBuffer buffer,
+            final int offset,
+            final int length,
+            final Header header)
+        {
+            final ExclusivePublication log = onElectionConsensusControlState.logPublication();
+            ingressMessageCount.incrementAndGet();
+
+            while (log.offer(buffer, offset, length) < 0)
+            {
+                Tests.yield();
+            }
+
+            return ControlledFragmentHandler.Action.CONTINUE;
+        }
+
+        public ControlledFragmentHandler.Action onLogExtensionMessage(
+            final int actingBlockLength,
+            final int templateId,
+            final int schemaId,
+            final int actingVersion,
+            final DirectBuffer buffer,
+            final int offset,
+            final int length,
+            final Header header)
+        {
+            logMessageCount.incrementAndGet();
+            return ControlledFragmentHandler.Action.CONTINUE;
+        }
+
+        public void close()
+        {
+
+        }
+
+        public void onSessionOpened(final long clusterSessionId)
+        {
+
+        }
+
+        public void onSessionClosed(final long clusterSessionId, final CloseReason closeReason)
+        {
+
+        }
+
+        public void onPrepareForNewLeadership()
+        {
+
+        }
+
+        public void onTakeSnapshot(final ExclusivePublication snapshotPublication)
+        {
+
+        }
+    }
+
     public static class MessageTrackingService extends TestNode.TestService
     {
+        public static final int TIMER_MESSAGES_PER_INGRESS = 2;
+        public static final int SERVICE_MESSAGES_PER_INGRESS = 3;
+
         private static volatile boolean delaySessionMessageProcessing;
         private static final byte SNAPSHOT_COUNTERS = (byte)1;
         private static final byte SNAPSHOT_CLIENT_MESSAGES = (byte)2;
@@ -958,7 +1122,7 @@ public final class TestNode implements AutoCloseable
                 clientMessages.addInt(messageId);
 
                 // Send 3 service messages
-                for (int i = 0; i < 3; i++)
+                for (int i = 0; i < SERVICE_MESSAGES_PER_INGRESS; i++)
                 {
                     messageBuffer.putInt(0, ++nextServiceMessageNumber, LITTLE_ENDIAN);
 
@@ -970,7 +1134,7 @@ public final class TestNode implements AutoCloseable
                 }
 
                 // Schedule two timers
-                for (int i = 0; i < 2; i++)
+                for (int i = 0; i < TIMER_MESSAGES_PER_INGRESS; i++)
                 {
                     final long timerId = --nextTimerCorrelationId;
                     idleStrategy.reset();
@@ -1104,10 +1268,13 @@ public final class TestNode implements AutoCloseable
         final AtomicBoolean isTerminationExpected = new AtomicBoolean();
         final AtomicBoolean hasMemberTerminated = new AtomicBoolean();
         final AtomicBoolean[] hasServiceTerminated;
+        final String hostName;
         final TestService[] services;
+        Supplier<TestConsensusModuleExtension> extensionSupplier;
 
-        Context(final TestService[] services, final String nodeMappings)
+        Context(final TestService[] services, final String hostName, final String nodeMappings)
         {
+            this.hostName = hostName;
             mediaDriverContext.nameResolver(new RedirectingNameResolver(nodeMappings));
 
             this.services = services;

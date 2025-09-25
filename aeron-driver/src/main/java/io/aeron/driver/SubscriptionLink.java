@@ -29,15 +29,17 @@ public abstract class SubscriptionLink implements DriverManagedResource
 {
     final long registrationId;
     final int streamId;
-    final int sessionId;
-    final boolean hasSessionId;
     final boolean isSparse;
     final boolean isTether;
-    boolean reachedEndOfLife = false;
+    final boolean isResponse;
+    final boolean isRejoin;
     final CommonContext.InferableBoolean group;
     final String channel;
     final AeronClient aeronClient;
     final IdentityHashMap<Subscribable, ReadablePosition> positionBySubscribableMap;
+    int sessionId;
+    boolean hasSessionId;
+    boolean reachedEndOfLife = false;
 
     SubscriptionLink(
         final long registrationId,
@@ -55,6 +57,8 @@ public abstract class SubscriptionLink implements DriverManagedResource
         this.isSparse = params.isSparse;
         this.isTether = params.isTether;
         this.group = params.group;
+        this.isResponse = params.isResponse;
+        this.isRejoin = params.isRejoin;
 
         positionBySubscribableMap = new IdentityHashMap<>(hasSessionId ? 1 : 8);
     }
@@ -99,6 +103,17 @@ public abstract class SubscriptionLink implements DriverManagedResource
         return sessionId;
     }
 
+    void sessionId(final int sessionId)
+    {
+        this.hasSessionId = true;
+        this.sessionId = sessionId;
+    }
+
+    boolean isResponse()
+    {
+        return isResponse;
+    }
+
     ReceiveChannelEndpoint channelEndpoint()
     {
         return null;
@@ -111,7 +126,7 @@ public abstract class SubscriptionLink implements DriverManagedResource
 
     boolean isRejoin()
     {
-        return true;
+        return isRejoin;
     }
 
     boolean isTether()
@@ -132,11 +147,6 @@ public abstract class SubscriptionLink implements DriverManagedResource
     boolean hasSessionId()
     {
         return hasSessionId;
-    }
-
-    boolean isResponse()
-    {
-        return false;
     }
 
     boolean matches(final NetworkPublication publication)

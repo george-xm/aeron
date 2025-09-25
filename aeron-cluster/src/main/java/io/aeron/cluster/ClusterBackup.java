@@ -15,7 +15,12 @@
  */
 package io.aeron.cluster;
 
-import io.aeron.*;
+import io.aeron.Aeron;
+import io.aeron.AeronCounters;
+import io.aeron.ChannelUri;
+import io.aeron.CommonContext;
+import io.aeron.Counter;
+import io.aeron.RethrowingErrorHandler;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.archive.client.ArchiveException;
 import io.aeron.cluster.client.AeronCluster;
@@ -37,7 +42,14 @@ import org.agrona.ExpandableArrayBuffer;
 import org.agrona.IoUtil;
 import org.agrona.MarkFile;
 import org.agrona.Strings;
-import org.agrona.concurrent.*;
+import org.agrona.concurrent.AgentInvoker;
+import org.agrona.concurrent.AgentRunner;
+import org.agrona.concurrent.CountedErrorHandler;
+import org.agrona.concurrent.EpochClock;
+import org.agrona.concurrent.IdleStrategy;
+import org.agrona.concurrent.NoOpLock;
+import org.agrona.concurrent.SystemEpochClock;
+import org.agrona.concurrent.YieldingIdleStrategy;
 import org.agrona.concurrent.errors.DistinctErrorLog;
 import org.agrona.concurrent.status.AtomicCounter;
 
@@ -51,6 +63,7 @@ import java.util.function.Supplier;
 
 import static io.aeron.AeronCounters.CLUSTER_BACKUP_SNAPSHOT_RETRIEVE_COUNT_TYPE_ID;
 import static io.aeron.CommonContext.ENDPOINT_PARAM_NAME;
+import static io.aeron.CommonContext.driverFilePageSize;
 import static io.aeron.cluster.ConsensusModule.Configuration.SERVICE_ID;
 import static io.aeron.cluster.service.ClusteredServiceContainer.Configuration.LIVENESS_TIMEOUT_MS;
 import static java.lang.System.getProperty;
@@ -564,6 +577,7 @@ public final class ClusterBackup implements AutoCloseable
     public static class Context implements Cloneable
     {
         private static final VarHandle IS_CONCLUDED_VH;
+
         static
         {
             try
@@ -618,7 +632,6 @@ public final class ClusterBackup implements AutoCloseable
 
         private AeronArchive.Context archiveContext;
         private AeronArchive.Context clusterArchiveContext;
-        private ShutdownSignalBarrier shutdownSignalBarrier;
         private Runnable terminationHook;
         private ClusterBackupEventsListener eventsListener;
         private CredentialsSupplier credentialsSupplier;
@@ -704,12 +717,15 @@ public final class ClusterBackup implements AutoCloseable
 
             if (null == markFile)
             {
+                final int filePageSize = null != aeron ? aeron.context().filePageSize() :
+                    driverFilePageSize(new File(aeronDirectoryName), epochClock, new CommonContext().driverTimeoutMs());
                 markFile = new ClusterMarkFile(
                     new File(markFileDir, ClusterMarkFile.FILENAME),
                     ClusterComponentType.BACKUP,
                     errorBufferLength,
                     epochClock,
-                    LIVENESS_TIMEOUT_MS);
+                    LIVENESS_TIMEOUT_MS,
+                    filePageSize);
             }
 
             MarkFile.ensureMarkFileLink(
@@ -724,6 +740,7 @@ public final class ClusterBackup implements AutoCloseable
 
             errorHandler = CommonContext.setupErrorHandler(errorHandler, errorLog);
 
+            final String clientName = "cluster-backup clusterId=" + clusterId;
             if (null == aeron)
             {
                 ownsAeronClient = true;
@@ -736,7 +753,8 @@ public final class ClusterBackup implements AutoCloseable
                         .useConductorAgentInvoker(true)
                         .awaitingIdleStrategy(YieldingIdleStrategy.INSTANCE)
                         .subscriberErrorHandler(RethrowingErrorHandler.INSTANCE)
-                        .clientLock(NoOpLock.INSTANCE));
+                        .clientLock(NoOpLock.INSTANCE)
+                        .clientName(clientName));
 
                 if (null == errorCounter)
                 {
@@ -756,7 +774,7 @@ public final class ClusterBackup implements AutoCloseable
                 throw new ClusterException("Aeron client must use a RethrowingErrorHandler");
             }
 
-            if (null == aeron.conductorAgentInvoker())
+            if (!aeron.context().useConductorAgentInvoker())
             {
                 throw new ClusterException("Aeron client must use conductor agent invoker");
             }
@@ -825,7 +843,8 @@ public final class ClusterBackup implements AutoCloseable
                 .aeron(aeron)
                 .errorHandler(errorHandler)
                 .ownsAeronClient(false)
-                .lock(NoOpLock.INSTANCE);
+                .lock(NoOpLock.INSTANCE)
+                .clientName(clientName);
 
             if (!archiveContext.controlRequestChannel().startsWith(CommonContext.IPC_CHANNEL))
             {
@@ -845,16 +864,12 @@ public final class ClusterBackup implements AutoCloseable
             clusterArchiveContext
                 .aeron(aeron)
                 .ownsAeronClient(false)
-                .lock(NoOpLock.INSTANCE);
-
-            if (null == shutdownSignalBarrier)
-            {
-                shutdownSignalBarrier = new ShutdownSignalBarrier();
-            }
+                .lock(NoOpLock.INSTANCE)
+                .clientName(clientName);
 
             if (null == terminationHook)
             {
-                terminationHook = () -> shutdownSignalBarrier.signalAll();
+                terminationHook = () -> {};
             }
 
             if (null == credentialsSupplier)
@@ -1564,28 +1579,6 @@ public final class ClusterBackup implements AutoCloseable
         }
 
         /**
-         * Set the {@link ShutdownSignalBarrier} that can be used to shut down a consensus module.
-         *
-         * @param barrier that can be used to shut down a consensus module.
-         * @return this for a fluent API.
-         */
-        public Context shutdownSignalBarrier(final ShutdownSignalBarrier barrier)
-        {
-            shutdownSignalBarrier = barrier;
-            return this;
-        }
-
-        /**
-         * Get the {@link ShutdownSignalBarrier} that can be used to shut down.
-         *
-         * @return the {@link ShutdownSignalBarrier} that can be used to shut down.
-         */
-        public ShutdownSignalBarrier shutdownSignalBarrier()
-        {
-            return shutdownSignalBarrier;
-        }
-
-        /**
          * Set the {@link Runnable} that is called when the {@link ClusterBackup} processes a termination action.
          *
          * @param terminationHook that can be used to terminate.
@@ -1599,8 +1592,6 @@ public final class ClusterBackup implements AutoCloseable
 
         /**
          * Get the {@link Runnable} that is called when the {@link ClusterBackup} processes a termination action.
-         * <p>
-         * The default action is to call signal on the {@link #shutdownSignalBarrier()}.
          *
          * @return the {@link Runnable} that can be used to terminate.
          */
@@ -1961,13 +1952,13 @@ public final class ClusterBackup implements AutoCloseable
             {
                 CloseHelper.close(countedErrorHandler, aeron);
             }
-            else
+            else if (!aeron.isClosed())
             {
                 CloseHelper.close(countedErrorHandler, stateCounter);
                 CloseHelper.close(countedErrorHandler, liveLogPositionCounter);
             }
 
-            CloseHelper.close(countedErrorHandler, markFile);
+            CloseHelper.close(markFile);
         }
 
         /**
@@ -2012,7 +2003,6 @@ public final class ClusterBackup implements AutoCloseable
                 "\n    nextQueryDeadlineMsCounter=" + nextQueryDeadlineMsCounter +
                 "\n    archiveContext=" + archiveContext +
                 "\n    clusterArchiveContext=" + clusterArchiveContext +
-                "\n    shutdownSignalBarrier=" + shutdownSignalBarrier +
                 "\n    terminationHook=" + terminationHook +
                 "\n    eventsListener=" + eventsListener +
                 "\n}";

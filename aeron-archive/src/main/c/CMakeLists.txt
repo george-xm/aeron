@@ -130,6 +130,7 @@ add_custom_target(c_codecs DEPENDS ${GENERATED_C_CODECS})
 SET(SOURCE
     client/aeron_archive_async_connect.c
     client/aeron_archive_client.c
+    client/aeron_archive_client_version.c
     client/aeron_archive_configuration.c
     client/aeron_archive_context.c
     client/aeron_archive_control_response_poller.c
@@ -148,6 +149,7 @@ SET(HEADERS
     client/aeron_archive.h
     client/aeron_archive_async_connect.h
     client/aeron_archive_client.h
+    client/aeron_archive_client_version.h
     client/aeron_archive_configuration.h
     client/aeron_archive_context.h
     client/aeron_archive_control_response_poller.h

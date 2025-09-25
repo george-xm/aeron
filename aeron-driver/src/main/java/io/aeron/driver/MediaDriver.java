@@ -18,6 +18,7 @@ package io.aeron.driver;
 import io.aeron.Aeron;
 import io.aeron.CncFileDescriptor;
 import io.aeron.CommonContext;
+import io.aeron.command.ControlProtocolEvents;
 import io.aeron.config.Config;
 import io.aeron.driver.buffer.FileStoreLogFactory;
 import io.aeron.driver.buffer.LogFactory;
@@ -102,10 +103,8 @@ public final class MediaDriver implements AutoCloseable
     {
         loadPropertiesFiles(args);
 
-        final ShutdownSignalBarrier barrier = new ShutdownSignalBarrier();
-        final MediaDriver.Context ctx = new MediaDriver.Context().terminationHook(barrier::signal);
-
-        try (MediaDriver ignore = MediaDriver.launch(ctx))
+        try (ShutdownSignalBarrier barrier = new ShutdownSignalBarrier();
+            MediaDriver ignore = MediaDriver.launch(new Context().terminationHook(barrier::signal)))
         {
             barrier.await();
             System.out.println("Shutdown Driver...");
@@ -464,6 +463,7 @@ public final class MediaDriver implements AutoCloseable
         private long publicationConnectionTimeoutNs = Configuration.publicationConnectionTimeoutNs();
         private long publicationLingerTimeoutNs = Configuration.publicationLingerTimeoutNs();
         private long untetheredWindowLimitTimeoutNs = Configuration.untetheredWindowLimitTimeoutNs();
+        private long untetheredLingerTimeoutNs = Configuration.untetheredLingerTimeoutNs();
         private long untetheredRestingTimeoutNs = Configuration.untetheredRestingTimeoutNs();
         private long statusMessageTimeoutNs = Configuration.statusMessageTimeoutNs();
         private long counterFreeToReuseTimeoutNs = Configuration.counterFreeToReuseTimeoutNs();
@@ -473,6 +473,10 @@ public final class MediaDriver implements AutoCloseable
         private long nakUnicastRetryDelayRatio = Configuration.nakUnicastRetryDelayRatio();
         private long nakMulticastMaxBackoffNs = Configuration.nakMulticastMaxBackoffNs();
         private long flowControlReceiverTimeoutNs = Configuration.flowControlReceiverTimeoutNs();
+        private int unicastFlowControlRetransmitReceiverWindowMultiple = Configuration
+            .unicastFlowControlRetransmitReceiverWindowMultiple();
+        private int multicastFlowControlRetransmitReceiverWindowMultiple = Configuration
+            .multicastFlowControlRetransmitReceiverWindowMultiple();
         private long reResolutionCheckIntervalNs = Configuration.reResolutionCheckIntervalNs();
         private long conductorCycleThresholdNs = Configuration.conductorCycleThresholdNs();
         private long senderCycleThresholdNs = Configuration.senderCycleThresholdNs();
@@ -637,6 +641,7 @@ public final class MediaDriver implements AutoCloseable
         /**
          * {@inheritDoc}
          */
+        @SuppressWarnings("MethodLength")
         public Context conclude()
         {
             super.conclude();
@@ -658,7 +663,7 @@ public final class MediaDriver implements AutoCloseable
                     "toClientsBufferLength");
                 validateValueRange(
                     counterValuesBufferLength,
-                    COUNTERS_VALUES_BUFFER_LENGTH_DEFAULT,
+                    COUNTERS_VALUES_BUFFER_LENGTH_MIN,
                     COUNTERS_VALUES_BUFFER_LENGTH_MAX,
                     "counterValuesBufferLength");
                 validateValueRange(
@@ -668,16 +673,36 @@ public final class MediaDriver implements AutoCloseable
                 validateValueRange(
                     ipcPublicationTermWindowLength, 0, TERM_MAX_LENGTH, "ipcPublicationTermWindowLength");
 
+                validateValueRange(
+                    nakUnicastDelayNs, NAK_UNICAST_DELAY_MIN_VALUE_NS, Long.MAX_VALUE, "nakUnicastDelayNs");
+                validateValueRange(
+                    nakUnicastRetryDelayRatio, 1, Long.MAX_VALUE, "nakUnicastRetryDelayRatio");
+                Math.multiplyExact(nakUnicastDelayNs, nakUnicastRetryDelayRatio);
+
                 validateSessionIdRange(publicationReservedSessionIdLow, publicationReservedSessionIdHigh);
 
                 LogBufferDescriptor.checkTermLength(publicationTermBufferLength);
                 LogBufferDescriptor.checkTermLength(ipcTermBufferLength);
                 validateInitialWindowLength(initialWindowLength, mtuLength);
                 validateUnblockTimeout(publicationUnblockTimeoutNs(), clientLivenessTimeoutNs(), timerIntervalNs);
-                validateUntetheredTimeouts(untetheredWindowLimitTimeoutNs, untetheredRestingTimeoutNs, timerIntervalNs);
+                validateUntetheredTimeouts(
+                    untetheredWindowLimitTimeoutNs,
+                    untetheredLingerTimeoutNs,
+                    untetheredRestingTimeoutNs,
+                    timerIntervalNs);
+                validateValueRange(
+                    unicastFlowControlRetransmitReceiverWindowMultiple,
+                    1, Integer.MAX_VALUE,
+                    "unicastFlowControlRetransmitReceiverWindowMultiple"
+                );
+                validateValueRange(
+                    multicastFlowControlRetransmitReceiverWindowMultiple,
+                    1, Integer.MAX_VALUE,
+                    "multicastFControlRetransmitReceiverWindowMultiple"
+                );
 
                 final long cncFileLength = BitUtil.align(
-                    (long)END_OF_METADATA_OFFSET +
+                    (long)META_DATA_LENGTH +
                     conductorBufferLength +
                     toClientsBufferLength +
                     countersMetadataBufferLength(counterValuesBufferLength) +
@@ -692,18 +717,19 @@ public final class MediaDriver implements AutoCloseable
                     cncMetaDataBuffer,
                     conductorBufferLength,
                     toClientsBufferLength,
-                    Configuration.countersMetadataBufferLength(counterValuesBufferLength),
+                    countersMetadataBufferLength(counterValuesBufferLength),
                     counterValuesBufferLength,
                     clientLivenessTimeoutNs,
                     errorBufferLength,
                     epochClock.time(),
-                    SystemUtil.getPid());
+                    SystemUtil.getPid(),
+                    filePageSize);
 
                 concludeCounters();
                 concludeDependantProperties();
                 concludeIdleStrategies();
 
-                systemCounters.get(BYTES_CURRENTLY_MAPPED).setOrdered(cncFileLength + lossReportBufferLength);
+                systemCounters.get(BYTES_CURRENTLY_MAPPED).setRelease(cncFileLength + lossReportBufferLength);
 
                 toDriverCommands.nextCorrelationId();
                 toDriverCommands.consumerHeartbeatTime(epochClock.time());
@@ -1223,6 +1249,33 @@ public final class MediaDriver implements AutoCloseable
         public Context untetheredWindowLimitTimeoutNs(final long timeoutNs)
         {
             this.untetheredWindowLimitTimeoutNs = timeoutNs;
+            return this;
+        }
+
+        /**
+         * The linger timeout for an untethered subscription.
+         *
+         * @return timeout that an untethered subscription will linger.
+         * @see Configuration#UNTETHERED_LINGER_TIMEOUT_PROP_NAME
+         * @since 1.48.0
+         */
+        @Config
+        public long untetheredLingerTimeoutNs()
+        {
+            return untetheredLingerTimeoutNs;
+        }
+
+        /**
+         * The timeout for when an untethered subscription that is outside the window will participate
+         * in local flow control.
+         *
+         * @param timeoutNs that an untethered subscription to linger.
+         * @return this for a fluent API.
+         * @see Configuration#UNTETHERED_LINGER_TIMEOUT_PROP_NAME
+         */
+        public Context untetheredLingerTimeoutNs(final long timeoutNs)
+        {
+            this.untetheredLingerTimeoutNs = timeoutNs;
             return this;
         }
 
@@ -2644,6 +2697,72 @@ public final class MediaDriver implements AutoCloseable
         public Context flowControlReceiverTimeoutNs(final long timeoutNs)
         {
             this.flowControlReceiverTimeoutNs = timeoutNs;
+            return this;
+        }
+
+        /**
+         * Flow control strategies may limit how much data is sent during a retransmission to
+         * avoid saturating the network and potentially causing more loss. The maximum
+         * retransmission size will be based on a multiple of the receiver window size.
+         * <p>
+         * See @{@link FlowControl#calculateRetransmissionLength(int, int, int, int)}
+         *
+         * @return window size multiple for the unicast strategy.
+         */
+        @Config
+        public int unicastFlowControlRetransmitReceiverWindowMultiple()
+        {
+            return unicastFlowControlRetransmitReceiverWindowMultiple;
+        }
+
+        /**
+         * Flow control strategies may limit how much data is sent during a retransmission to
+         * avoid saturating the network and potentially causing more loss. The maximum
+         * retransmission size will be based on a multiple of the receiver window size.
+         * <p>
+         * See @{@link FlowControl#calculateRetransmissionLength(int, int, int, int)}
+         *
+         * @param unicastFlowControlRetransmitReceiverWindowMultiple window size multiple for the unicast strategy.
+         * @return this for a fluent API.
+         */
+        public Context unicastFlowControlRetransmitReceiverWindowMultiple(
+            final int unicastFlowControlRetransmitReceiverWindowMultiple)
+        {
+            this.unicastFlowControlRetransmitReceiverWindowMultiple =
+                unicastFlowControlRetransmitReceiverWindowMultiple;
+            return this;
+        }
+
+        /**
+         * Flow control strategies may limit how much data is sent during a retransmission to
+         * avoid saturating the network and potentially causing more loss. The maximum
+         * retransmission size will be based on a multiple of the receiver window size.
+         * <p>
+         * See @{@link FlowControl#calculateRetransmissionLength(int, int, int, int)}
+         *
+         * @return window size multiple for multicast strategies.
+         */
+        @Config
+        public int multicastFlowControlRetransmitReceiverWindowMultiple()
+        {
+            return multicastFlowControlRetransmitReceiverWindowMultiple;
+        }
+
+        /**
+         * Flow control strategies may limit how much data is sent during a retransmission to
+         * avoid saturating the network and potentially causing more loss. The maximum
+         * retransmission size will be based on a multiple of the receiver window size.
+         * <p>
+         * See @{@link FlowControl#calculateRetransmissionLength(int, int, int, int)}
+         *
+         * @param multicastFlowControlRetransmitReceiverWindowMultiple window size multiple for multicast strategies.
+         * @return this for a fluent API.
+         */
+        public Context multicastFlowControlRetransmitReceiverWindowMultiple(
+            final int multicastFlowControlRetransmitReceiverWindowMultiple)
+        {
+            this.multicastFlowControlRetransmitReceiverWindowMultiple =
+                multicastFlowControlRetransmitReceiverWindowMultiple;
             return this;
         }
 
@@ -4071,9 +4190,13 @@ public final class MediaDriver implements AutoCloseable
                 new LinkedBlockingQueue<>(),
                 (r) ->
                 {
-                    final Thread thread = new Thread(
-                        r,
-                        "async-task-executor-" + id.getAndIncrement() + " " + dirName);
+                    String threadName = "async-executor";
+                    if (threadCount > 1)
+                    {
+                        threadName += "-" + id.getAndIncrement();
+                    }
+                    threadName += " " + dirName;
+                    final Thread thread = new Thread(r, threadName);
                     thread.setDaemon(true);
                     return thread;
                 });
@@ -4113,6 +4236,7 @@ public final class MediaDriver implements AutoCloseable
             final int aeronVersion = SemanticVersion.compose(
                 MediaDriverVersion.MAJOR_VERSION, MediaDriverVersion.MINOR_VERSION, MediaDriverVersion.PATCH_VERSION);
             systemCounters.get(AERON_VERSION).set(aeronVersion);
+            systemCounters.get(CONTROL_PROTOCOL_VERSION).set(ControlProtocolEvents.CONTROL_PROTOCOL_SEMANTIC_VERSION);
         }
 
         @SuppressWarnings("MethodLength")
@@ -4388,6 +4512,10 @@ public final class MediaDriver implements AutoCloseable
                 "\n    flowControlGroupTag=" + flowControlGroupTag +
                 "\n    flowControlGroupMinSize=" + flowControlGroupMinSize +
                 "\n    flowControlReceiverTimeoutNs=" + flowControlReceiverTimeoutNs +
+                "\n    unicastFlowControlRetransmitReceiverWindowMultiple=" +
+                unicastFlowControlRetransmitReceiverWindowMultiple +
+                "\n    multicastFControlRetransmitReceiverWindowMultiple=" +
+                multicastFlowControlRetransmitReceiverWindowMultiple +
                 "\n    reResolutionCheckIntervalNs=" + reResolutionCheckIntervalNs +
                 "\n    receiverGroupConsideration=" + receiverGroupConsideration +
                 "\n    congestionControlSupplier=" + congestionControlSupplier +

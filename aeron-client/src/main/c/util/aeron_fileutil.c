@@ -124,6 +124,49 @@ static int aeron_mmap(aeron_mapped_file_t *mapping, int fd, bool pre_touch)
     return MAP_FAILED == mapping->addr ? -1 : 0;
 }
 
+static int aeron_delete_path(const char *path, FILEOP_FLAGS flags)
+{
+    char buffer[(AERON_MAX_PATH * 2) + 2] = {0 };
+
+    size_t path_length = strlen(path);
+    if (path_length > (AERON_MAX_PATH * 2))
+    {
+        AERON_SET_ERR_WIN(EINVAL, "Path is too long: %s", path);
+        return -1;
+    }
+
+    memcpy(buffer, path, path_length);
+    buffer[path_length] = '\0';
+    buffer[path_length + 1] = '\0';
+
+    SHFILEOPSTRUCT file_op =
+            {
+                    NULL,
+                    FO_DELETE,
+                    buffer,
+                    NULL,
+                    flags,
+                    false,
+                    NULL,
+                    NULL
+            };
+
+    int result = SHFileOperation(&file_op);
+    if (0 == result)
+    {
+        if (file_op.fAnyOperationsAborted)
+        {
+            AERON_SET_ERR_WIN(EINVAL, "Delete was aborted: %s", path);
+            return -1;
+        }
+
+        return 0;
+    }
+
+    AERON_SET_ERR_WIN(GetLastError(), "Delete failed: %s", path);
+    return -1;
+}
+
 int aeron_unmap(aeron_mapped_file_t *mapped_file)
 {
     if (NULL != mapped_file->addr)
@@ -179,20 +222,19 @@ uint64_t aeron_usable_fs_space(const char *path)
 
 int aeron_create_file(const char *path, size_t length, bool sparse_file)
 {
-    int fd;
-    int error = _sopen_s(&fd, path, _O_RDWR | _O_CREAT | _O_EXCL, _SH_DENYNO, _S_IREAD | _S_IWRITE);
+    HANDLE hfile = CreateFile(
+            path,
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            NULL,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_POSIX_SEMANTICS,
+            NULL);
 
-    if (NO_ERROR != error)
+    if (INVALID_HANDLE_VALUE == hfile)
     {
         AERON_SET_ERR_WIN(GetLastError(), "Failed to create file: %s", path);
         return -1;
-    }
-
-    HANDLE hfile = (HANDLE)_get_osfhandle(fd);
-    if (INVALID_HANDLE_VALUE == hfile)
-    {
-        AERON_SET_ERR_WIN(GetLastError(), "Failed to obtain operating-system file handle: %s", path);
-        goto error;
     }
 
     if (sparse_file)
@@ -215,25 +257,45 @@ int aeron_create_file(const char *path, size_t length, bool sparse_file)
         goto error;
     }
 
+    int fd = _open_osfhandle((intptr_t)hfile, _O_RDWR);
+    if (fd < 0)
+    {
+        AERON_SET_ERR_WIN(GetLastError(), "Failed to obtain file descriptor: %s", path);
+        goto error;
+    }
+
     return fd;
 
 error:
-    _close(fd);
-    if (-1 == remove(path))
+    CloseHandle(hfile);
+    if (-1 == aeron_delete_file(path))
     {
-        AERON_APPEND_ERR("(%d) Failed to remove file", GetLastError());
+        AERON_APPEND_ERR("(%d) Failed to remove file: %s", GetLastError(), path);
     }
     return -1;
 }
 
 int aeron_open_file_rw(const char *path)
 {
-    int fd;
-    int error = _sopen_s(&fd, path, _O_RDWR, _SH_DENYNO, _S_IREAD | _S_IWRITE);
+    HANDLE hfile = CreateFile(
+            path,
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            NULL,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_POSIX_SEMANTICS,
+            NULL);
 
-    if (NO_ERROR != error)
+    if (INVALID_HANDLE_VALUE == hfile)
     {
         AERON_SET_ERR_WIN(GetLastError(), "Failed to open file: %s", path);
+        return -1;
+    }
+
+    int fd = _open_osfhandle((intptr_t)hfile, _O_RDWR);
+    if (fd < 0)
+    {
+        AERON_SET_ERR_WIN(GetLastError(), "Failed to obtain file descriptor: %s", path);
         return -1;
     }
 
@@ -242,39 +304,18 @@ int aeron_open_file_rw(const char *path)
 
 int aeron_delete_directory(const char *dir)
 {
-    char dir_buffer[(AERON_MAX_PATH * 2) + 2] = { 0 };
-
-    size_t dir_length = strlen(dir);
-    if (dir_length > (AERON_MAX_PATH * 2))
-    {
-        return -1;
-    }
-
-    memcpy(dir_buffer, dir, dir_length);
-    dir_buffer[dir_length] = '\0';
-    dir_buffer[dir_length + 1] = '\0';
-
-    SHFILEOPSTRUCT file_op =
-        {
-            NULL,
-            FO_DELETE,
-            dir_buffer,
-            NULL,
-            FOF_NOCONFIRMATION |
-            FOF_NOERRORUI |
-            FOF_SILENT,
-            false,
-            NULL,
-            NULL
-        };
-
-    return SHFileOperation(&file_op);
+    return aeron_delete_path(dir, FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT);
 }
 
 int aeron_is_directory(const char *path)
 {
     const DWORD attributes = GetFileAttributes(path);
     return INVALID_FILE_ATTRIBUTES != attributes && (attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+int aeron_delete_file(const char *dir)
+{
+    return aeron_delete_path(dir, FOF_NORECURSION | FOF_FILESONLY | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT);
 }
 
 #else
@@ -284,6 +325,8 @@ int aeron_is_directory(const char *path)
 #include <ftw.h>
 #include <stdio.h>
 #include <pwd.h>
+
+#define aeron_delete_file remove
 
 static int aeron_mmap(aeron_mapped_file_t *mapping, int fd, bool pre_touch)
 {
@@ -771,7 +814,7 @@ bool aeron_raw_log_free(aeron_mapped_raw_log_t *mapped_raw_log, const char *file
 
     if (NULL != filename && mapped_raw_log->mapped_file.length > 0)
     {
-        if (remove(filename) < 0 && aeron_file_length(filename) > 0)
+        if (aeron_delete_file(filename) < 0 && aeron_file_length(filename) > 0)
         {
             return false;
         }

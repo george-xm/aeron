@@ -20,6 +20,7 @@ import io.aeron.ExclusivePublication;
 import io.aeron.Image;
 import io.aeron.archive.ArchiveThreadingMode;
 import io.aeron.cluster.client.AeronCluster;
+import io.aeron.cluster.codecs.CloseReason;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
 import io.aeron.logbuffer.ControlledFragmentHandler;
@@ -229,6 +230,16 @@ class ClusterWithNoServicesTest
             return 0;
         }
 
+        public int slowTickWork(final long nowNs)
+        {
+            return 0;
+        }
+
+        public int consensusWork(final long nowNs)
+        {
+            return 0;
+        }
+
         public void onElectionComplete(final ConsensusControlState consensusControlState)
         {
         }
@@ -279,7 +290,7 @@ class ClusterWithNoServicesTest
             }
         }
 
-        public void onSessionClosed(final long clusterSessionId)
+        public void onSessionClosed(final long clusterSessionId, final CloseReason closeReason)
         {
         }
 

@@ -220,3 +220,87 @@ TEST_F(DriverContextConfigTest, shouldReadLowFileStoreWarningThresholdFromAnEnvi
     EXPECT_EQ(default_low_storage_warning_threshold, aeron_driver_context_get_low_file_store_warning_threshold(context));
     aeron_driver_context_close(context);
 }
+
+
+TEST_F(DriverContextConfigTest, shouldHonorUntetheredLingerFromAnEnvironmentVariable)
+{
+    aeron_driver_context_t *context = nullptr;
+
+    ASSERT_EQ(0, aeron_driver_context_init(&context));
+    EXPECT_EQ(AERON_NULL_VALUE, aeron_driver_context_get_untethered_linger_timeout_ns(context));
+    aeron_driver_context_close(context);
+
+    aeron_env_set(AERON_UNTETHERED_LINGER_TIMEOUT_ENV_VAR, "5000000");
+    ASSERT_EQ(0, aeron_driver_context_init(&context));
+    EXPECT_EQ(5000000, aeron_driver_context_get_untethered_linger_timeout_ns(context));
+    aeron_driver_context_close(context);
+
+    ASSERT_EQ(0, aeron_driver_context_init(&context));
+    aeron_driver_context_set_untethered_linger_timeout_ns(context, 3000000);
+    EXPECT_EQ(3000000, aeron_driver_context_get_untethered_linger_timeout_ns(context));
+    aeron_driver_context_close(context);
+}
+
+TEST_F(DriverContextConfigTest, shouldInitializeNakUnicastDelayToDefaultValue)
+{
+    aeron_driver_context_t *context;
+    EXPECT_EQ(0, aeron_driver_context_init(&context));
+
+    EXPECT_EQ(1000, aeron_driver_context_get_nak_unicast_delay_ns(context));
+    EXPECT_EQ(100, aeron_driver_context_get_nak_unicast_retry_delay_ratio(context));
+
+    aeron_driver_context_close(context);
+}
+
+TEST_F(DriverContextConfigTest, shouldInitializeNakUnicastDelayFromEnvironment)
+{
+    aeron_driver_context_t *context;
+    aeron_env_set(AERON_NAK_UNICAST_DELAY_ENV_VAR, "3s");
+    aeron_env_set(AERON_NAK_UNICAST_RETRY_DELAY_RATIO_ENV_VAR, "171");
+    EXPECT_EQ(0, aeron_driver_context_init(&context));
+
+    EXPECT_EQ(3ul * 1000 * 1000 * 1000, aeron_driver_context_get_nak_unicast_delay_ns(context));
+    EXPECT_EQ(171, aeron_driver_context_get_nak_unicast_retry_delay_ratio(context));
+
+    aeron_driver_context_close(context);
+}
+
+TEST_F(DriverContextConfigTest, shouldUseMinimumValuesIsNakDelayIsOutOfBounds)
+{
+    aeron_driver_context_t *context;
+    aeron_env_set(AERON_NAK_UNICAST_DELAY_ENV_VAR, "876");
+    aeron_env_set(AERON_NAK_UNICAST_RETRY_DELAY_RATIO_ENV_VAR, "0");
+    EXPECT_EQ(0, aeron_driver_context_init(&context));
+
+    EXPECT_EQ(1000, aeron_driver_context_get_nak_unicast_delay_ns(context));
+    EXPECT_EQ(1, aeron_driver_context_get_nak_unicast_retry_delay_ratio(context));
+
+    aeron_driver_context_close(context);
+}
+
+TEST_F(DriverContextConfigTest, shouldSetNakDelayExplicitly)
+{
+    aeron_driver_context_t *context;
+    EXPECT_EQ(0, aeron_driver_context_init(&context));
+
+    const uint64_t nakDelayNs = 15ul * 1000 * 1245;
+    EXPECT_EQ(0, aeron_driver_context_set_nak_unicast_delay_ns(context, nakDelayNs));
+    EXPECT_EQ(nakDelayNs, aeron_driver_context_get_nak_unicast_delay_ns(context));
+
+    const uint64_t nakDelayRatio = INT64_MAX;
+    EXPECT_EQ(0, aeron_driver_context_set_nak_unicast_retry_delay_ratio(context, nakDelayRatio));
+    EXPECT_EQ(nakDelayRatio, aeron_driver_context_get_nak_unicast_retry_delay_ratio(context));
+
+    aeron_driver_context_close(context);
+}
+
+TEST_F(DriverContextConfigTest, shouldFailInitIfNakDelayComboIsOutOfBounds)
+{
+    aeron_driver_context_t *context;
+    aeron_env_set(AERON_NAK_UNICAST_DELAY_ENV_VAR, "1000000s");
+    aeron_env_set(AERON_NAK_UNICAST_RETRY_DELAY_RATIO_ENV_VAR, "567890473482340000");
+    EXPECT_EQ(-1, aeron_driver_context_init(&context));
+    EXPECT_NE(
+        std::string::npos,
+        std::string(aeron_errmsg()).find("nak_unicast_delay_ns (1000000000000000) * nak_unicast_retry_delay_ratio (567890473482340000) exceeds 9223372036854775807"));
+}

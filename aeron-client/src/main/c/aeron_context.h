@@ -29,7 +29,7 @@
 typedef struct aeron_context_stct
 {
     char aeron_dir[AERON_MAX_PATH];
-    const char *client_name;
+    char client_name[AERON_COUNTER_MAX_CLIENT_NAME_LENGTH];
 
     aeron_error_handler_t error_handler;
     void *error_handler_clientd;

@@ -18,6 +18,8 @@ package io.aeron.cluster;
 import io.aeron.ExclusivePublication;
 import io.aeron.Image;
 import io.aeron.Publication;
+import io.aeron.api.InternalApi;
+import io.aeron.cluster.codecs.CloseReason;
 import io.aeron.cluster.service.Cluster;
 import io.aeron.logbuffer.ControlledFragmentHandler;
 import io.aeron.logbuffer.Header;
@@ -28,6 +30,7 @@ import org.agrona.concurrent.AgentTerminationException;
  * Extension for handling messages from external schemas unknown to core Aeron Cluster code
  * thus providing an extension to the core ingress consensus module behaviour.
  */
+@InternalApi
 public interface ConsensusModuleExtension extends AutoCloseable
 {
     /**
@@ -62,6 +65,22 @@ public interface ConsensusModuleExtension extends AutoCloseable
      * @return 0 to indicate no work was currently available, a positive value otherwise.
      */
     int doWork(long nowNs);
+
+    /**
+     * Similar to {@link #doWork(long)}, but executed less frequently.
+     *
+     * @param nowNs is cluster time in nanoseconds.
+     * @return 0 to indicate no work was currently available, a positive value otherwise.
+     */
+    int slowTickWork(long nowNs);
+
+    /**
+     * Similar to {@link #doWork(long)}, but executed only when there's no election in progress.
+     *
+     * @param nowNs is cluster time in nanoseconds.
+     * @return 0 to indicate no work was currently available, a positive value otherwise.
+     */
+    int consensusWork(long nowNs);
 
     /**
      * Cluster election is complete and new publication is added for the leadership term. If the node is a follower
@@ -145,9 +164,10 @@ public interface ConsensusModuleExtension extends AutoCloseable
     /**
      * Callback indicating a cluster session has closed.
      *
-     * @param clusterSessionId of the opened session which is unique and not reused.
+     * @param clusterSessionId  of the opened session which is unique and not reused.
+     * @param closeReason       reason to closing session
      */
-    void onSessionClosed(long clusterSessionId);
+    void onSessionClosed(long clusterSessionId, CloseReason closeReason);
 
     /**
      * Callback when preparing for a new Raft leadership term - before election.

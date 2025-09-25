@@ -15,7 +15,6 @@
  */
 plugins {
     id 'java-library'
-    alias(libs.plugins.bnd).apply(false)
     alias(libs.plugins.shadow).apply(false)
     alias(libs.plugins.versions)
 }
@@ -51,38 +50,42 @@ def aeronGroup = 'io.aeron'
 def aeronVersion = file('version.txt').text.trim()
 def gitCommitHash = io.aeron.build.GithubUtil.currentGitHash("${projectDir}")
 
+def getConfigProperty(final String projectPropertyName, final String envVarName) {
+    String value = project.findProperty(projectPropertyName)
+    if (!value) {
+        value = System.getenv(envVarName)
+        if (!value) {
+            return null
+        }
+    }
+
+    value = value.trim()
+
+    return value ? value : null
+}
+
 ext {
     isReleaseVersion = !aeronVersion.endsWith('-SNAPSHOT')
-    releasesRepoUrl = 'https://oss.sonatype.org/service/local/staging/deploy/maven2/'
-    snapshotsRepoUrl = 'https://oss.sonatype.org/content/repositories/snapshots/'
 
-    if (!project.hasProperty('ossrhUsername')) {
-        ossrhUsername = ''
-    }
+    sonatypeCentralPortalReleasesRepoUrl = 'https://ossrh-staging-api.central.sonatype.com/service/local/staging/deploy/maven2/'
+    sonatypeCentralPortalSnapshotsRepoUrl = 'https://central.sonatype.com/repository/maven-snapshots/'
+    sonatypeCentralPortalUsername = getConfigProperty('sonatypeCentralPortalUsername', 'SONATYPE_CENTRAL_PORTAL_USERNAME')
+    sonatypeCentralPortalPassword = getConfigProperty('sonatypeCentralPortalPassword', 'SONATYPE_CENTRAL_PORTAL_PASSWORD')
 
-    if (!project.hasProperty('ossrhPassword')) {
-        ossrhPassword = ''
-    }
-
-    if (!project.hasProperty('signingKey')) {
-        signingKey = null
-    }
-
-    if (!project.hasProperty('signingPassword')) {
-        signingPassword = null
-    }
+    signingKey = getConfigProperty('signingKey', 'SIGNING_GPG_SECRET_KEY')         // NOTE: ASCII armored secret key
+    signingPassword = getConfigProperty('signingPassword', 'SIGNING_GPG_PASSWORD') // NOTE: Plain text
 }
 
 def projectPom = {
     name = 'aeron'
     // optionally artifactId can be defined here
     description = 'Efficient reliable UDP unicast, UDP multicast, and IPC transport protocol.'
-    url = 'https://github.com/real-logic/aeron'
+    url = 'https://github.com/aeron-io/aeron'
 
     scm {
-        connection = 'scm:git:https://github.com/real-logic/aeron.git'
-        developerConnection = 'scm:git:https://github.com/real-logic/aeron.git'
-        url = 'https://github.com/real-logic/aeron.git'
+        connection = 'scm:git:https://github.com/aeron-io/aeron.git'
+        developerConnection = 'scm:git:https://github.com/aeron-io/aeron.git'
+        url = 'https://github.com/aeron-io/aeron.git'
     }
 
     licenses {
@@ -126,7 +129,7 @@ def projectPom = {
         developer {
             id = 'vyazelenko'
             name = 'Dmytro Vyazelenko'
-            email = 'vyazelenko@protonmail.com '
+            email = 'vyazelenko@protonmail.com'
             url = 'https://github.com/vyazelenko'
         }
     }
@@ -145,13 +148,13 @@ allprojects {
             failOnVersionConflict()
 
             force libs.agrona,
-                libs.byteBuddy,
-                libs.byteBuddy.agent,
-                // patching conflicting Checkstyle dependencies
-                "org.codehaus.plexus:plexus-utils:3.3.0",
-                "org.apache.commons:commons-lang3:3.8.1",
-                "org.apache.httpcomponents:httpcore:4.4.14",
-                "commons-codec:commons-codec:1.15"
+                  libs.byteBuddy,
+                  libs.byteBuddy.agent,
+                  // patching conflicting Checkstyle dependencies
+                  libs.commons.codec,
+                  libs.commons.lang3,
+                  libs.httpcore,
+                  libs.plexus.utils
         }
     }
 
@@ -165,10 +168,15 @@ subprojects {
     apply plugin: 'java-library'
     apply plugin: 'checkstyle'
 
+    group = aeronGroup
+    version = aeronVersion
+
+    checkstyle.toolVersion = libs.versions.checkstyle.get()
+
     dependencies {
         testImplementation libs.hamcrest
         testImplementation libs.mockito
-        testImplementation platform("org.junit:junit-bom:${libs.versions.junit.get()}")
+        testImplementation platform(libs.junit.bom)
         testImplementation "org.junit.jupiter:junit-jupiter-params"
         testRuntimeOnly "org.junit.jupiter:junit-jupiter-engine"
         testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
@@ -180,11 +188,6 @@ subprojects {
         }
         sourceCompatibility = JavaVersion.VERSION_17
     }
-
-    group = aeronGroup
-    version = aeronVersion
-
-    checkstyle.toolVersion = libs.versions.checkstyle.get()
 
     tasks.withType(Sign).configureEach {
         onlyIf {
@@ -219,12 +222,12 @@ subprojects {
         }
         testClassesDirs = testing.suites.test.sources.output.classesDirs
         classpath = testing.suites.test.sources.runtimeClasspath
-        maxHeapSize("1g")
+        maxHeapSize = '1g'
         jvmArgs("-XX:MaxDirectMemorySize=1g",
                 "-XX:+CreateCoredumpOnCrash",
                 "-XX:+HeapDumpOnOutOfMemoryError",
                 "-XX:+CrashOnOutOfMemoryError",
-                "-XX:HeapDumpPath=" + project.rootDir + "/heap.hprof")
+                "-XX:HeapDumpPath=${project.rootDir}/heap.hprof")
 
         useJUnitPlatform {
             if (test.name != 'slowTest' && test.name != 'bindingsTest' && test.name != 'topologyTest')
@@ -253,10 +256,14 @@ subprojects {
             'aeron.dir.delete.on.start': 'true',
             'aeron.term.buffer.sparse.file': 'true',
             'aeron.perform.storage.checks': 'false',
+            'agrona.disable.bounds.checks': 'false',
             'agrona.strict.alignment.checks': 'true',
             'net.bytebuddy.experimental': 'true',
             'io.aeron.shadow.net.bytebuddy.experimental': 'true',
+            'net.bytebuddy.safe': 'true',
+            'io.aeron.shadow.net.bytebuddy.safe': 'true',
             'java.net.preferIPv4Stack': 'true',
+            'aeron.fallback.logger': 'no_op',
             'aeron.test.system.aeronmd.path': System.getProperty('aeron.test.system.aeronmd.path'),
             'aeron.test.system.binding.remote.host': System.getProperty('aeron.test.system.binding.remote.host'),
             'aeron.test.system.binding.local.host': System.getProperty('aeron.test.system.binding.local.host'),
@@ -272,7 +279,7 @@ subprojects {
     def aeronLoggingAgent = project.file("../aeron-agent/build/libs/aeron-agent-${aeronVersion}.jar").absolutePath
 
     tasks.register('slowTest', Test) {
-        group 'verification'
+        group = 'verification'
         dependsOn ':aeron-agent:jar'
 
         maxParallelForks = 1
@@ -287,11 +294,10 @@ subprojects {
         systemProperty 'aeron.event.log', 'admin'
         systemProperty 'aeron.debug.timeout', '3600s'
         systemProperty 'aeron.event.log.reader.classname', 'io.aeron.agent.CollectingEventLogReaderAgent'
-        systemProperty 'aeron.fallback.logger', 'no_op'
     }
 
     tasks.register('bindingsTest', Test) {
-        group 'verification'
+        group = 'verification'
         dependsOn ':aeron-agent:jar'
 
         maxParallelForks = 1
@@ -307,7 +313,7 @@ subprojects {
     }
 
     tasks.register('topologyTest', Test) {
-        group 'verification'
+        group = 'verification'
         maxParallelForks = 1
         useJUnitPlatform {
             includeTags 'topology'
@@ -315,7 +321,7 @@ subprojects {
     }
 
     javadoc {
-        failOnError false
+        failOnError = false
         title = '<h1>Aeron Message Transport</h1>'
         options.bottom = '<i>Copyright &#169; 2014-2025 Real Logic Limited. All Rights Reserved.</i>'
         options.encoding = 'UTF-8'
@@ -358,25 +364,14 @@ subprojects {
 project(':aeron-annotations') {
     apply plugin: 'maven-publish'
     apply plugin: 'signing'
-    apply plugin: 'biz.aQute.bnd.builder'
 
     jar {
-        bundle {
-            bnd """
-                Automatic-Module-Name:  io.aeron.annotations
-                Bundle-Name:            io.aeron.annotations
-                Bundle-SymbolicName:    io.aeron.annotations
-                Implementation-Title:   Aeron
-                Implementation-Vendor:  Real Logic Limited
-                Implementation-Version: ${aeronVersion}
-    
-                -exportcontents: io.aeron.version
-    
-                # Suppress headers that reduce reproducibility.
-                -reproducible: true
-                -noextraheaders: true
-            """
-        }
+        manifest.attributes(
+            'Automatic-Module-Name': 'io.aeron.annotations',
+            'Implementation-Title': 'Aeron',
+            'Implementation-Vendor': 'Adaptive Financial Consulting Limited',
+            'Implementation-Version': aeronVersion
+        )
     }
 
     java {
@@ -394,10 +389,10 @@ project(':aeron-annotations') {
 
         repositories {
             maven {
-                url(!isReleaseVersion ? snapshotsRepoUrl : releasesRepoUrl)
+                url = !isReleaseVersion ? sonatypeCentralPortalSnapshotsRepoUrl : sonatypeCentralPortalReleasesRepoUrl
                 credentials {
-                    username = ossrhUsername
-                    password = ossrhPassword
+                    username = sonatypeCentralPortalUsername
+                    password = sonatypeCentralPortalPassword
                 }
             }
         }
@@ -414,7 +409,6 @@ project(':aeron-annotations') {
 project(':aeron-client') {
     apply plugin: 'maven-publish'
     apply plugin: 'signing'
-    apply plugin: 'biz.aQute.bnd.builder'
 
     dependencies {
         api libs.agrona
@@ -424,22 +418,12 @@ project(':aeron-client') {
     }
 
     jar {
-        bundle {
-            bnd """
-                Automatic-Module-Name:  io.aeron.client
-                Bundle-Name:            io.aeron.client
-                Bundle-SymbolicName:    io.aeron.client
-                Implementation-Title:   Aeron
-                Implementation-Vendor:  Real Logic Limited
-                Implementation-Version: ${aeronVersion}
-    
-                -exportcontents: io.aeron, io.aeron.*
-    
-                # Suppress headers that reduce reproducibility.
-                -reproducible: true
-                -noextraheaders: true
-            """
-        }
+        manifest.attributes(
+            'Automatic-Module-Name': 'io.aeron.client',
+            'Implementation-Title': 'Aeron',
+            'Implementation-Vendor': 'Adaptive Financial Consulting Limited',
+            'Implementation-Version': aeronVersion
+        )
     }
 
     java {
@@ -461,10 +445,10 @@ project(':aeron-client') {
 
         repositories {
             maven {
-                url(!isReleaseVersion ? snapshotsRepoUrl : releasesRepoUrl)
+                url = !isReleaseVersion ? sonatypeCentralPortalSnapshotsRepoUrl : sonatypeCentralPortalReleasesRepoUrl
                 credentials {
-                    username = ossrhUsername
-                    password = ossrhPassword
+                    username = sonatypeCentralPortalUsername
+                    password = sonatypeCentralPortalPassword
                 }
             }
         }
@@ -516,7 +500,6 @@ project(':aeron-driver') {
     apply plugin: 'maven-publish'
     apply plugin: 'signing'
     apply plugin: 'application'
-    apply plugin: 'biz.aQute.bnd.builder'
 
     application {
         mainClass.set('io.aeron.driver.MediaDriver')
@@ -530,22 +513,12 @@ project(':aeron-driver') {
     }
 
     jar {
-        bundle {
-            bnd """
-                Automatic-Module-Name:  io.aeron.driver
-                Bundle-Name:            io.aeron.driver
-                Bundle-SymbolicName:    io.aeron.driver
-                Implementation-Title:   Aeron
-                Implementation-Vendor:  Real Logic Limited
-                Implementation-Version: ${aeronVersion}
-    
-                -exportcontents: io.aeron.driver, io.aeron.driver.*
-    
-                # Suppress headers that reduce reproducibility.
-                -reproducible: true
-                -noextraheaders: true
-            """
-        }
+        manifest.attributes(
+            'Automatic-Module-Name': 'io.aeron.driver',
+            'Implementation-Title': 'Aeron',
+            'Implementation-Vendor': 'Adaptive Financial Consulting Limited',
+            'Implementation-Version': aeronVersion
+        )
     }
 
     jar.finalizedBy assembleDist
@@ -572,10 +545,10 @@ project(':aeron-driver') {
 
         repositories {
             maven {
-                url(!isReleaseVersion ? snapshotsRepoUrl : releasesRepoUrl)
+                url = !isReleaseVersion ? sonatypeCentralPortalSnapshotsRepoUrl : sonatypeCentralPortalReleasesRepoUrl
                 credentials {
-                    username = ossrhUsername
-                    password = ossrhPassword
+                    username = sonatypeCentralPortalUsername
+                    password = sonatypeCentralPortalPassword
                 }
             }
         }
@@ -615,7 +588,6 @@ project(':aeron-driver') {
 project(':aeron-archive') {
     apply plugin: 'maven-publish'
     apply plugin: 'signing'
-    apply plugin: 'biz.aQute.bnd.builder'
 
     configurations{
         codecGeneration
@@ -757,22 +729,12 @@ project(':aeron-archive') {
     jar {
         from sourceSets.generated.output
 
-        bundle {
-            bnd """
-                Automatic-Module-Name:  io.aeron.archive
-                Bundle-Name:            io.aeron.archive
-                Bundle-SymbolicName:    io.aeron.archive
-                Implementation-Title:   Aeron
-                Implementation-Vendor:  Real Logic Limited
-                Implementation-Version: ${aeronVersion}
-    
-                -exportcontents: io.aeron.archive, io.aeron.archive.*
-    
-                # Suppress headers that reduce reproducibility.
-                -reproducible: true
-                -noextraheaders: true
-            """
-        }
+        manifest.attributes(
+            'Automatic-Module-Name': 'io.aeron.archive',
+            'Implementation-Title': 'Aeron',
+            'Implementation-Vendor': 'Adaptive Financial Consulting Limited',
+            'Implementation-Version': aeronVersion
+        )
     }
 
     tasks.register('sourcesJar', Jar) {
@@ -806,10 +768,10 @@ project(':aeron-archive') {
 
         repositories {
             maven {
-                url(!isReleaseVersion ? snapshotsRepoUrl : releasesRepoUrl)
+                url = !isReleaseVersion ? sonatypeCentralPortalSnapshotsRepoUrl : sonatypeCentralPortalReleasesRepoUrl
                 credentials {
-                    username = ossrhUsername
-                    password = ossrhPassword
+                    username = sonatypeCentralPortalUsername
+                    password = sonatypeCentralPortalPassword
                 }
             }
         }
@@ -838,7 +800,6 @@ project(':aeron-archive') {
 project(':aeron-cluster') {
     apply plugin: 'maven-publish'
     apply plugin: 'signing'
-    apply plugin: 'biz.aQute.bnd.builder'
 
     configurations{
         codecGeneration
@@ -905,30 +866,52 @@ project(':aeron-cluster') {
         args = [markCodecsFileV0]
     }
 
+    tasks.register('generateTestCodecsV5', JavaExec) {
+        inputs.files(codecsFile, sbeFile)
+        outputs.dir generatedTestDir
+
+        mainClass.set('uk.co.real_logic.sbe.SbeTool')
+        classpath = configurations.codecGeneration
+        systemProperties(
+                'sbe.output.dir': generatedTestDir,
+                'sbe.target.language': 'Java',
+                'sbe.validation.xsd': sbeFile,
+                'sbe.validation.stop.on.error': 'true',
+                'sbe.target.namespace': 'io.aeron.cluster.codecs.v5',
+                'sbe.schema.transform.version': '*:5')
+        args = [codecsFile]
+    }
+
+    tasks.register('generateTestCodecsV12', JavaExec) {
+        inputs.files(codecsFile, sbeFile)
+        outputs.dir generatedTestDir
+
+        mainClass.set('uk.co.real_logic.sbe.SbeTool')
+        classpath = configurations.codecGeneration
+        systemProperties(
+                'sbe.output.dir': generatedTestDir,
+                'sbe.target.language': 'Java',
+                'sbe.validation.xsd': sbeFile,
+                'sbe.validation.stop.on.error': 'true',
+                'sbe.target.namespace': 'io.aeron.cluster.codecs.v12',
+                'sbe.schema.transform.version': '*:12')
+        args = [codecsFile]
+    }
+
     compileJava.dependsOn 'compileGeneratedJava'
     compileGeneratedJava.dependsOn 'generateCodecs'
     compileTestJava.dependsOn 'compileGeneratedTestJava'
-    compileGeneratedTestJava.dependsOn 'generateTestCodecsMarkFileV0'
+    compileGeneratedTestJava.dependsOn 'generateTestCodecsMarkFileV0', 'generateTestCodecsV5', 'generateTestCodecsV12'
 
     jar {
         from sourceSets.generated.output
 
-        bundle {
-            bnd """
-                Automatic-Module-Name:  io.aeron.cluster
-                Bundle-Name:            io.aeron.cluster
-                Bundle-SymbolicName:    io.aeron.cluster
-                Implementation-Title:   Aeron
-                Implementation-Vendor:  Real Logic Limited
-                Implementation-Version: ${aeronVersion}
-    
-                -exportcontents: io.aeron.cluster, io.aeron.cluster.*
-    
-                # Suppress headers that reduce reproducibility.
-                -reproducible: true
-                -noextraheaders: true
-            """
-        }
+        manifest.attributes(
+            'Automatic-Module-Name': 'io.aeron.cluster',
+            'Implementation-Title': 'Aeron',
+            'Implementation-Vendor': 'Adaptive Financial Consulting Limited',
+            'Implementation-Version': aeronVersion
+        )
     }
 
     tasks.register('sourcesJar', Jar) {
@@ -964,10 +947,10 @@ project(':aeron-cluster') {
 
         repositories {
             maven {
-                url(!isReleaseVersion ? snapshotsRepoUrl : releasesRepoUrl)
+                url = !isReleaseVersion ? sonatypeCentralPortalSnapshotsRepoUrl : sonatypeCentralPortalReleasesRepoUrl
                 credentials {
-                    username = ossrhUsername
-                    password = ossrhPassword
+                    username = sonatypeCentralPortalUsername
+                    password = sonatypeCentralPortalPassword
                 }
             }
         }
@@ -1007,8 +990,8 @@ project(':aeron-agent') {
         implementation aeronClusterProject
         implementation libs.byteBuddy
         implementation libs.byteBuddy.agent
-        compileOnly libs.findbugs
-        testCompileOnly libs.findbugs
+        compileOnly libs.findbugs.annotations
+        testCompileOnly libs.findbugs.annotations
         testImplementation project(':aeron-test-support')
     }
 
@@ -1016,14 +999,14 @@ project(':aeron-agent') {
         archiveClassifier.set('')
 
         manifest.attributes(
+            'Automatic-Module-Name': 'io.aeron.agent',
             'Implementation-Title': 'Aeron',
+            'Implementation-Vendor': 'Adaptive Financial Consulting Limited',
             'Implementation-Version': aeronVersion,
-            'Implementation-Vendor': 'Real Logic Limited',
             "Premain-Class": "io.aeron.agent.EventLogAgent",
             "Agent-Class": "io.aeron.agent.EventLogAgent",
             "Can-Redefine-Classes": "true",
-            "Can-Retransform-Classes": "true",
-            'Automatic-Module-Name': 'io.aeron.agent'
+            "Can-Retransform-Classes": "true"
         )
 
         relocate 'net.bytebuddy', 'io.aeron.shadow.net.bytebuddy'
@@ -1032,10 +1015,10 @@ project(':aeron-agent') {
     jar.finalizedBy shadowJar
 
     tasks.register('dedupJar', io.aeron.build.DeduplicateTask) {
-        source shadowJar.outputs.files.singleFile
+        source = shadowJar.outputs.files.singleFile
     }
 
-    shadowJar.finalizedBy dedupJar
+    shadowJar.finalizedBy('dedupJar')
 
     tasks.register('sourcesJar', Jar) {
         dependsOn ':aeron-archive:generateCodecs', ':aeron-cluster:generateCodecs'
@@ -1078,10 +1061,10 @@ project(':aeron-agent') {
         }
         repositories {
             maven {
-                url(!isReleaseVersion ? snapshotsRepoUrl : releasesRepoUrl)
+                url = !isReleaseVersion ? sonatypeCentralPortalSnapshotsRepoUrl : sonatypeCentralPortalReleasesRepoUrl
                 credentials {
-                    username = ossrhUsername
-                    password = ossrhPassword
+                    username = sonatypeCentralPortalUsername
+                    password = sonatypeCentralPortalPassword
                 }
             }
         }
@@ -1120,10 +1103,10 @@ project(':aeron-samples') {
 
         repositories {
             maven {
-                url(!isReleaseVersion ? snapshotsRepoUrl : releasesRepoUrl)
+                url = !isReleaseVersion ? sonatypeCentralPortalSnapshotsRepoUrl : sonatypeCentralPortalReleasesRepoUrl
                 credentials {
-                    username = ossrhUsername
-                    password = ossrhPassword
+                    username = sonatypeCentralPortalUsername
+                    password = sonatypeCentralPortalPassword
                 }
             }
         }
@@ -1158,7 +1141,6 @@ project(':aeron-samples') {
         systemProperty 'aeron.event.log', 'admin'
         systemProperty 'aeron.debug.timeout', '3600s'
         systemProperty 'aeron.event.log.reader.classname', 'io.aeron.agent.CollectingEventLogReaderAgent'
-        systemProperty 'aeron.fallback.logger', 'no_op'
     }
 
     tasks.register('asciidoctorGithub', io.aeron.build.AsciidoctorPreprocessTask) {
@@ -1189,7 +1171,7 @@ project(':aeron-system-tests') {
         testImplementation project(path: ':aeron-cluster')
         testImplementation libs.byteBuddy
         testImplementation libs.byteBuddy.agent
-        testCompileOnly libs.findbugs
+        testCompileOnly libs.findbugs.annotations
     }
 
     tasks.named('test').configure {
@@ -1206,7 +1188,6 @@ project(':aeron-system-tests') {
         systemProperty 'aeron.event.log', 'admin'
         systemProperty 'aeron.debug.timeout', '3600s'
         systemProperty 'aeron.event.log.reader.classname', 'io.aeron.agent.CollectingEventLogReaderAgent'
-        systemProperty 'aeron.fallback.logger', 'no_op'
     }
 
     shadowJar {
@@ -1226,10 +1207,19 @@ project(':aeron-test-support') {
         implementation project(':aeron-client')
         implementation project(':aeron-cluster')
         implementation project(':aeron-samples')
-        implementation platform("org.junit:junit-bom:${libs.versions.junit.get()}")
+        implementation platform(libs.junit.bom)
         implementation "org.junit.jupiter:junit-jupiter-api"
         implementation "org.junit.jupiter:junit-jupiter-params"
         implementation libs.mockito
+    }
+
+    jar {
+        manifest.attributes(
+            'Automatic-Module-Name': 'io.aeron.test-support',
+            'Implementation-Title': 'Aeron',
+            'Implementation-Vendor': 'Adaptive Financial Consulting Limited',
+            'Implementation-Version': aeronVersion
+        )
     }
 
     java {
@@ -1247,10 +1237,10 @@ project(':aeron-test-support') {
 
         repositories {
             maven {
-                url(!isReleaseVersion ? snapshotsRepoUrl : releasesRepoUrl)
+                url = !isReleaseVersion ? sonatypeCentralPortalSnapshotsRepoUrl : sonatypeCentralPortalReleasesRepoUrl
                 credentials {
-                    username = ossrhUsername
-                    password = ossrhPassword
+                    username = sonatypeCentralPortalUsername
+                    password = sonatypeCentralPortalPassword
                 }
             }
         }
@@ -1283,10 +1273,11 @@ project(':aeron-all') {
     shadowJar {
         archiveClassifier.set('')
         manifest.attributes(
+            'Automatic-Module-Name': 'io.aeron.all',
             'Implementation-Title': 'Aeron',
-            'Implementation-Version': aeronVersion,
-            'Implementation-Vendor': 'Real Logic Limited',
-            'Automatic-Module-Name': 'io.aeron.all')
+            'Implementation-Vendor': 'Adaptive Financial Consulting Limited',
+            'Implementation-Version': aeronVersion
+        )
 
         relocate 'net.bytebuddy', 'io.aeron.shadow.net.bytebuddy'
         relocate 'org.HdrHistogram', 'io.aeron.shadow.org.HdrHistogram'
@@ -1295,10 +1286,10 @@ project(':aeron-all') {
     jar.finalizedBy shadowJar
 
     tasks.register('dedupJar', io.aeron.build.DeduplicateTask) {
-        source shadowJar.outputs.files.singleFile
+        source = shadowJar.outputs.files.singleFile
     }
 
-    shadowJar.finalizedBy dedupJar
+    shadowJar.finalizedBy('dedupJar')
 
     tasks.register('sourcesJar', Jar) {
         dependsOn ':aeron-archive:generateCodecs', ':aeron-cluster:generateCodecs'
@@ -1343,10 +1334,10 @@ project(':aeron-all') {
         }
         repositories {
             maven {
-                url(!isReleaseVersion ? snapshotsRepoUrl : releasesRepoUrl)
+                url = !isReleaseVersion ? sonatypeCentralPortalSnapshotsRepoUrl : sonatypeCentralPortalReleasesRepoUrl
                 credentials {
-                    username = ossrhUsername
-                    password = ossrhPassword
+                    username = sonatypeCentralPortalUsername
+                    password = sonatypeCentralPortalPassword
                 }
             }
         }
@@ -1374,6 +1365,7 @@ tasks.register('copyTestLogs', Copy) {
     include '/var/coredump/core*'
     include '**/*.log'
     include '**/*.tlog'
+    include '**/*.PML'
     include '**/build/reports/tests/**'
     include '**/build/test-results/**/*'
     include 'LICENSE'
@@ -1387,7 +1379,7 @@ tasks.register('tarTestLogs', Tar) {
     dependsOn tasks.named('copyTestLogs')
     archiveBaseName.set('test_logs')
     from 'build/test_logs'
-    compression Compression.BZIP2
+    compression = Compression.BZIP2
 }
 
 def isNonStable = { String version ->
@@ -1403,7 +1395,13 @@ tasks.named('dependencyUpdates').configure {
     }
 }
 
+tasks.register('uploadArtifactsToCentralPortal', io.aeron.build.SonatypeCentralPortalUploadRepositoryTask) {
+    portalUsername.set(sonatypeCentralPortalUsername)
+    portalPassword.set(sonatypeCentralPortalPassword)
+    groupId.set(aeronGroup)
+    snapshotRelease.set(!isReleaseVersion)
+}
+
 wrapper {
-    gradleVersion = libs.versions.gradle.get()
     distributionType = 'ALL'
 }

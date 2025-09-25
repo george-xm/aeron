@@ -16,8 +16,9 @@
 package io.aeron.archive;
 
 import io.aeron.Aeron;
+import io.aeron.AeronCounters;
+import io.aeron.ChannelUri;
 import io.aeron.ChannelUriStringBuilder;
-import io.aeron.CommonContext;
 import io.aeron.Counter;
 import io.aeron.Image;
 import io.aeron.Publication;
@@ -25,6 +26,7 @@ import io.aeron.Subscription;
 import io.aeron.archive.Archive.Context;
 import io.aeron.archive.checksum.Checksum;
 import io.aeron.archive.client.AeronArchive;
+import io.aeron.archive.client.AeronArchiveVersion;
 import io.aeron.archive.client.ArchiveEvent;
 import io.aeron.archive.client.ArchiveException;
 import io.aeron.archive.client.RecordingSubscriptionDescriptorConsumer;
@@ -32,6 +34,7 @@ import io.aeron.archive.codecs.TruncateRecordingRequestDecoder;
 import io.aeron.archive.status.RecordingPos;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
+import io.aeron.driver.status.PublisherPos;
 import io.aeron.exceptions.AeronException;
 import io.aeron.logbuffer.BufferClaim;
 import io.aeron.logbuffer.FragmentHandler;
@@ -39,7 +42,9 @@ import io.aeron.logbuffer.FrameDescriptor;
 import io.aeron.logbuffer.LogBufferDescriptor;
 import io.aeron.protocol.DataHeaderFlyweight;
 import io.aeron.security.AuthorisationServiceSupplier;
+import io.aeron.security.CredentialsSupplier;
 import io.aeron.status.HeartbeatTimestamp;
+import io.aeron.status.LocalSocketAddressStatus;
 import io.aeron.test.InterruptAfter;
 import io.aeron.test.InterruptingTestCallback;
 import io.aeron.test.TestContexts;
@@ -48,6 +53,7 @@ import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
 import org.agrona.ErrorHandler;
 import org.agrona.IoUtil;
+import org.agrona.concurrent.AtomicBuffer;
 import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.ManyToOneConcurrentLinkedQueue;
 import org.agrona.concurrent.SystemEpochClock;
@@ -56,6 +62,7 @@ import org.agrona.concurrent.YieldingIdleStrategy;
 import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.concurrent.status.CountersReader;
 import org.hamcrest.CoreMatchers;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
@@ -76,10 +83,17 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.IntConsumer;
 
+import static io.aeron.Aeron.NULL_VALUE;
+import static io.aeron.CommonContext.CONTROL_MODE_RESPONSE;
+import static io.aeron.CommonContext.IPC_MEDIA;
+import static io.aeron.CommonContext.MDC_CONTROL_MODE_PARAM_NAME;
+import static io.aeron.CommonContext.SESSION_ID_PARAM_NAME;
+import static io.aeron.CommonContext.generateRandomDirName;
 import static io.aeron.archive.ArchiveThreadingMode.DEDICATED;
 import static io.aeron.archive.ArchiveThreadingMode.SHARED;
 import static io.aeron.archive.Catalog.MIN_CAPACITY;
@@ -88,14 +102,33 @@ import static io.aeron.archive.codecs.SourceLocation.LOCAL;
 import static io.aeron.logbuffer.FrameDescriptor.FRAME_ALIGNMENT;
 import static io.aeron.protocol.DataHeaderFlyweight.HEADER_LENGTH;
 import static io.aeron.status.HeartbeatTimestamp.HEARTBEAT_TYPE_ID;
-import static io.aeron.test.TestContexts.*;
+import static io.aeron.test.TestContexts.LOCALHOST_CONTROL_REQUEST_CHANNEL;
+import static io.aeron.test.TestContexts.LOCALHOST_CONTROL_RESPONSE_CHANNEL;
+import static io.aeron.test.TestContexts.LOCALHOST_REPLICATION_CHANNEL;
 import static org.agrona.BitUtil.align;
+import static org.agrona.concurrent.status.CountersReader.KEY_OFFSET;
 import static org.agrona.concurrent.status.CountersReader.NULL_COUNTER_ID;
-import static org.hamcrest.MatcherAssert.*;
-import static org.hamcrest.Matchers.*;
-import static org.junit.jupiter.api.Assertions.*;
+import static org.agrona.concurrent.status.CountersReader.RECORD_RECLAIMED;
+import static org.agrona.concurrent.status.CountersReader.metaDataOffset;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.allOf;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrowsExactly;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.params.provider.EnumSource.Mode.EXCLUDE;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @ExtendWith(InterruptingTestCallback.class)
 @SuppressWarnings("try")
@@ -227,7 +260,7 @@ class ArchiveTest
             final int initialTermId = 29;
 
             final String channel = new ChannelUriStringBuilder()
-                .media(CommonContext.IPC_MEDIA)
+                .media(IPC_MEDIA)
                 .initialPosition(initialPosition, initialTermId, termLength)
                 .build();
 
@@ -244,7 +277,7 @@ class ArchiveTest
             int counterId;
             final int sessionId = publication.sessionId();
             final CountersReader countersReader = aeron.countersReader();
-            while (Aeron.NULL_VALUE == (counterId = RecordingPos.findCounterIdBySession(
+            while (NULL_VALUE == (counterId = RecordingPos.findCounterIdBySession(
                 countersReader, sessionId, archive.archiveId())))
             {
                 Tests.yield();
@@ -697,7 +730,7 @@ class ArchiveTest
             final IdleStrategy idleStrategy = YieldingIdleStrategy.INSTANCE;
 
             final String channel = new ChannelUriStringBuilder()
-                .media(CommonContext.IPC_MEDIA)
+                .media(IPC_MEDIA)
                 .termLength(256 * 1024)
                 .build();
 
@@ -707,7 +740,7 @@ class ArchiveTest
                 final int sessionId = publication.sessionId();
                 final CountersReader countersReader = aeron.countersReader();
 
-                while (Aeron.NULL_VALUE == (counterId = RecordingPos.findCounterIdBySession(
+                while (NULL_VALUE == (counterId = RecordingPos.findCounterIdBySession(
                     countersReader, sessionId, archive.archiveId())))
                 {
                     Tests.yield();
@@ -737,7 +770,7 @@ class ArchiveTest
                 finalPubPos = publication.position();
             }
 
-            try (Subscription subscription = archive.replay(recordingId, 0, Aeron.NULL_VALUE, channel, 2))
+            try (Subscription subscription = archive.replay(recordingId, 0, NULL_VALUE, channel, 2))
             {
                 while (subscription.imageCount() == 0)
                 {
@@ -808,9 +841,9 @@ class ArchiveTest
     }
 
     @ParameterizedTest
-    @CsvSource({ "-1, archive", "888, archive-888" })
+    @ValueSource(ints = { -1, 888 })
     @InterruptAfter(10)
-    void shouldAssignClientName(final int archiveId, final String expectedClientName) throws IOException
+    void shouldAssignClientName(final int archiveId) throws IOException
     {
         final Path root = Files.createTempDirectory("test");
         final String aeronDir = root.resolve("media-driver").toString();
@@ -819,7 +852,7 @@ class ArchiveTest
             Archive archive = Archive.launch(TestContexts.localhostArchive()
                 .archiveId(archiveId)
                 .archiveDir(root.resolve("archive1").toFile())
-                .aeronDirectoryName(aeronDir));
+                .aeronDirectoryName(driver.aeronDirectoryName()));
             Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(aeronDir)))
         {
             final long archiveClientId = archive.context().aeron().clientId();
@@ -840,7 +873,9 @@ class ArchiveTest
                 }
                 else
                 {
-                    assertThat(counterLabel, CoreMatchers.containsString(expectedClientName));
+                    assertThat(
+                        counterLabel,
+                        CoreMatchers.containsString("name=archive archiveId=" + archive.context().archiveId()));
                     break;
                 }
                 Tests.checkInterruptStatus();
@@ -861,6 +896,7 @@ class ArchiveTest
         return (numMaxPayloads * (maxPayloadLength + HEADER_LENGTH)) + lastFrameLength;
     }
 
+    @SuppressWarnings("MethodLength")
     @ParameterizedTest
     @CsvSource({
         "aeron:udp?endpoint=localhost:8010, aeron:udp?endpoint=localhost:0",
@@ -872,11 +908,11 @@ class ArchiveTest
         final long archiveId = -743746574;
         final ErrorHandler errorHandler = mock(ErrorHandler.class);
         try (MediaDriver driver = MediaDriver.launch(new MediaDriver.Context()
-            .aeronDirectoryName(CommonContext.generateRandomDirName())
+            .aeronDirectoryName(generateRandomDirName())
+            .dirDeleteOnShutdown(true)
             .statusMessageTimeoutNs(TimeUnit.MILLISECONDS.toNanos(80))
             .imageLivenessTimeoutNs(TimeUnit.MILLISECONDS.toNanos(1000))
-            .timerIntervalNs(TimeUnit.MILLISECONDS.toNanos(100))
-            .enableExperimentalFeatures(true));
+            .timerIntervalNs(TimeUnit.MILLISECONDS.toNanos(100)));
             Archive archive = Archive.launch(TestContexts.localhostArchive()
                 .controlChannel("aeron:udp?endpoint=localhost:8010")
                 .localControlChannel("aeron:ipc?term-length=64k")
@@ -893,10 +929,9 @@ class ArchiveTest
                 .aeronDirectoryName(driver.context().aeronDirectoryName())
                 .controlRequestChannel(controlRequestChannel)
                 .controlRequestStreamId(archive.context().controlStreamId())
-                .controlResponseChannel(controlResponseChannel)
-                .controlResponseStreamId(999);
-            try (AeronArchive client1 = AeronArchive.connect(ctx.clone());
-                AeronArchive client2 = AeronArchive.connect(ctx.clone()))
+                .controlResponseChannel(controlResponseChannel);
+            try (AeronArchive client1 = AeronArchive.connect(ctx.clone().controlResponseStreamId(777));
+                AeronArchive client2 = AeronArchive.connect(ctx.clone().controlResponseStreamId(999)))
             {
                 assertEquals(archiveId, client1.archiveId());
                 assertEquals(archiveId, client2.archiveId());
@@ -924,41 +959,239 @@ class ArchiveTest
                 verify(errorHandler, timeout(1000)).onError(captor.capture());
                 final ArchiveEvent event = assertInstanceOf(ArchiveEvent.class, captor.getValue());
                 assertEquals(AeronException.Category.WARN, event.category());
-                assertEquals(
-                    "WARN - controlSessionId=" + client2.controlSessionId() + " terminated: " +
-                    "failed to send response for more than connectTimeoutMs=" +
-                    TimeUnit.NANOSECONDS.toMillis(archive.context().connectTimeoutNs()),
-                    event.getMessage());
+                final ChannelUri parsedResponseChannel = ChannelUri.parse(client2.context().controlResponseChannel());
+                assertThat(event.getMessage(), allOf(
+                    Matchers.startsWith("WARN - controlSessionId=" + client2.controlSessionId() + " ("),
+                    Matchers.endsWith(") terminated: failed to send response for more than connectTimeoutMs=" +
+                    TimeUnit.NANOSECONDS.toMillis(archive.context().connectTimeoutNs())),
+                    Matchers.containsString("controlResponseStreamId=999"),
+                    Matchers.containsString("controlResponseChannel=aeron:" + parsedResponseChannel.media())));
 
-                while (client2.controlResponsePoller().subscription().isConnected())
+                if (CONTROL_MODE_RESPONSE.equals(parsedResponseChannel.get(MDC_CONTROL_MODE_PARAM_NAME)))
+                {
+                    assertThat(event.getMessage(), allOf(
+                        Matchers.containsString("control-mode=response"),
+                        Matchers.containsString("response-correlation-id=")));
+                }
+                else
+                {
+                    assertThat(
+                        event.getMessage(),
+                        Matchers.containsString("session-id=" + parsedResponseChannel.get(SESSION_ID_PARAM_NAME)));
+                }
+
+                while (AeronArchive.State.CONNECTED == client2.state())
                 {
                     assertNull(client1.pollForErrorResponse());
-                    try
-                    {
-                        client2.checkForErrorResponse();
-                    }
-                    catch (final ArchiveException ex)
-                    {
-                        if (AeronArchive.State.DISCONNECTED == client2.state())
-                        {
-                            assertEquals("ERROR - not connected", ex.getMessage());
-                            assertTrue(client2.archiveProxy().publication().isConnected());
-                            assertFalse(client2.controlResponsePoller().subscription().isConnected());
-                        }
-                        else
-                        {
-                            assertEquals("ERROR - client is closed", ex.getMessage());
-                            assertFalse(client2.archiveProxy().publication().isConnected());
-                            assertFalse(client2.controlResponsePoller().subscription().isConnected());
-                        }
-                        break;
-                    }
+                    Tests.sleep(1);
                 }
+
+                // Closed via UnavailableImageHandler
+                assertEquals(AeronArchive.State.DISCONNECTED, client2.state());
+                assertFalse(client2.controlResponsePoller().subscription().isConnected());
+                Tests.await(() -> !client2.archiveProxy().publication().isConnected());
 
                 assertEquals(AeronArchive.State.CONNECTED, client1.state());
                 assertTrue(client1.archiveProxy().publication().isConnected());
                 assertTrue(client1.controlResponsePoller().subscription().isConnected());
             }
+        }
+    }
+
+    @Test
+    void archiveMarkFileShouldContainArchiveIdSetOnContextConclude()
+    {
+        final MediaDriver.Context driverCtx = new MediaDriver.Context()
+            .errorHandler(Tests::onError)
+            .dirDeleteOnStart(true)
+            .threadingMode(ThreadingMode.SHARED);
+        final Archive.Context archiveCtx = TestContexts.localhostArchive().threadingMode(SHARED);
+
+        assertEquals(NULL_VALUE, archiveCtx.archiveId()); // <-- Should not have been set yet.
+        try (ArchivingMediaDriver ignored = ArchivingMediaDriver.launch(driverCtx, archiveCtx);
+            AeronArchive archiveClient = AeronArchive.connect(TestContexts.localhostAeronArchive()))
+        {
+            final long archiveId = archiveCtx.archiveId(); // <-- Should have been set now as the context is concluded.
+            assertNotEquals(NULL_VALUE, archiveId);
+            assertEquals(archiveId, archiveClient.archiveId());
+            assertEquals(archiveId, archiveCtx.archiveMarkFile().archiveId());
+        }
+        finally
+        {
+            archiveCtx.deleteDirectory();
+            driverCtx.deleteDirectory();
+        }
+    }
+
+    @Test
+    void closedArchiveClientShouldBeInStateClosed(@TempDir final Path temp)
+    {
+        try (MediaDriver driver =
+            MediaDriver.launch(new MediaDriver.Context().aeronDirectoryName(generateRandomDirName()));
+            Archive archive = Archive.launch(TestContexts.localhostArchive()
+                .archiveDir(temp.toFile())
+                .archiveId(ThreadLocalRandom.current().nextLong())
+                .aeronDirectoryName(driver.context().aeronDirectoryName()));
+            AeronArchive aeronArchive = AeronArchive.connect(TestContexts.localhostAeronArchive()
+                .aeronDirectoryName(driver.context().aeronDirectoryName())))
+        {
+            assertEquals(archive.context().archiveId(), aeronArchive.archiveId());
+
+            final Publication publication = aeronArchive.archiveProxy().publication();
+            final Subscription subscription = aeronArchive.controlResponsePoller().subscription();
+
+            aeronArchive.close();
+
+            Tests.await(publication::isClosed);
+            Tests.await(subscription::isClosed);
+            assertTrue(aeronArchive.context().aeron().isClosed());
+            assertEquals(AeronArchive.State.CLOSED, aeronArchive.state());
+        }
+    }
+
+    @Test
+    void closedArchiveClientShouldBeInStateClosedCustomAeronClient(@TempDir final Path temp)
+    {
+        try (MediaDriver driver =
+            MediaDriver.launch(new MediaDriver.Context().aeronDirectoryName(generateRandomDirName()));
+            Archive archive = Archive.launch(TestContexts.localhostArchive()
+                .archiveDir(temp.toFile())
+                .archiveId(ThreadLocalRandom.current().nextLong())
+                .aeronDirectoryName(driver.context().aeronDirectoryName()));
+            Aeron aeron = Aeron.connect(new Aeron.Context()
+                .aeronDirectoryName(driver.context().aeronDirectoryName()));
+            AeronArchive aeronArchive = AeronArchive.connect(TestContexts.localhostAeronArchive()
+                .aeronDirectoryName(null)
+                .aeron(aeron)))
+        {
+            assertEquals(archive.context().archiveId(), aeronArchive.archiveId());
+
+            final Publication publication = aeronArchive.archiveProxy().publication();
+            final Subscription subscription = aeronArchive.controlResponsePoller().subscription();
+
+            aeronArchive.close();
+
+            Tests.await(publication::isClosed);
+            Tests.await(subscription::isClosed);
+            assertFalse(aeron.isClosed());
+            assertFalse(aeronArchive.context().aeron().isClosed());
+            assertEquals(AeronArchive.State.CLOSED, aeronArchive.state());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "", "test client 5" })
+    void shouldCreateControlSessionCounter(final String clientName, @TempDir final Path temp)
+    {
+        try (MediaDriver driver =
+            MediaDriver.launch(new MediaDriver.Context().aeronDirectoryName(generateRandomDirName()));
+            Archive archive = Archive.launch(TestContexts.localhostArchive()
+                .archiveDir(temp.toFile())
+                .archiveId(519)
+                .aeronDirectoryName(driver.context().aeronDirectoryName()));
+            AeronArchive aeronArchive = AeronArchive.connect(TestContexts.localhostAeronArchive()
+                .aeronDirectoryName(driver.context().aeronDirectoryName())
+                .clientName(clientName)))
+        {
+            final CountersReader countersReader = archive.context().aeron().countersReader();
+            assertEquals(archive.context().archiveId(), aeronArchive.archiveId());
+
+            final int counterId = ControlSessionCounter.findByControlSessionId(
+                countersReader, aeronArchive.archiveId(), aeronArchive.controlSessionId());
+            assertNotEquals(NULL_COUNTER_ID, counterId);
+            assertEquals(aeronArchive.controlSessionId(), countersReader.getCounterValue(counterId));
+
+            final int keyOffset = metaDataOffset(counterId) + KEY_OFFSET;
+            final AtomicBuffer metaDataBuffer = countersReader.metaDataBuffer();
+            assertEquals(
+                aeronArchive.archiveId(),
+                metaDataBuffer.getLong(keyOffset + ControlSessionCounter.ARCHIVE_ID_KEY_OFFSET));
+            assertEquals(
+                aeronArchive.controlSessionId(),
+                metaDataBuffer.getLong(keyOffset + ControlSessionCounter.CONTROL_SESSION_ID_KEY_OFFSET));
+
+            final long responsePubRegistrationId = countersReader.getCounterReferenceId(counterId);
+            assertNotEquals(NULL_VALUE, responsePubRegistrationId);
+            final int responsePubCounterId = countersReader.findByTypeIdAndRegistrationId(
+                PublisherPos.PUBLISHER_POS_TYPE_ID, responsePubRegistrationId);
+            assertNotEquals(NULL_COUNTER_ID, responsePubCounterId);
+
+            final Publication requestPublication = aeronArchive.archiveProxy().publication();
+            final String localAddress = LocalSocketAddressStatus.findAddress(
+                countersReader, requestPublication.channelStatus(), requestPublication.channelStatusId());
+            assertEquals(ControlSessionCounter.NAME + ": name=" + clientName + " " +
+                AeronCounters.formatVersionInfo(AeronArchiveVersion.VERSION, AeronArchiveVersion.GIT_SHA) +
+                " sourceIdentity=" + localAddress +
+                " sessionId=" + requestPublication.sessionId() +
+                ArchiveCounters.ARCHIVE_ID_LABEL_SUFFIX + aeronArchive.archiveId(),
+                countersReader.getCounterLabel(counterId));
+
+            aeronArchive.close();
+
+            Tests.await(() -> countersReader.getCounterState(counterId) == RECORD_RECLAIMED);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "", "test client 42" })
+    void shouldCreateControlSessionCounterIpcConnection(final String clientName, @TempDir final Path temp)
+    {
+        try (MediaDriver driver =
+            MediaDriver.launch(new MediaDriver.Context().aeronDirectoryName(generateRandomDirName()));
+            Archive archive = Archive.launch(TestContexts.localhostArchive()
+                .archiveDir(temp.toFile())
+                .archiveId(-187)
+                .aeronDirectoryName(driver.context().aeronDirectoryName()));
+            AeronArchive aeronArchive = AeronArchive.connect(TestContexts.ipcAeronArchive()
+                .aeronDirectoryName(driver.context().aeronDirectoryName())
+                .credentialsSupplier(new CredentialsSupplier()
+                {
+                    public byte[] encodedCredentials()
+                    {
+                        return "admin:test".getBytes(StandardCharsets.US_ASCII);
+                    }
+
+                    public byte[] onChallenge(final byte[] encodedChallenge)
+                    {
+                        return "challenged".getBytes(StandardCharsets.US_ASCII);
+                    }
+                })
+                .clientName(clientName)))
+        {
+            final CountersReader countersReader = archive.context().aeron().countersReader();
+            assertEquals(archive.context().archiveId(), aeronArchive.archiveId());
+
+            final int counterId = ControlSessionCounter.findByControlSessionId(
+                countersReader, aeronArchive.archiveId(), aeronArchive.controlSessionId());
+            assertNotEquals(NULL_COUNTER_ID, counterId);
+            assertEquals(aeronArchive.controlSessionId(), countersReader.getCounterValue(counterId));
+
+            final int keyOffset = metaDataOffset(counterId) + KEY_OFFSET;
+            final AtomicBuffer metaDataBuffer = countersReader.metaDataBuffer();
+            assertEquals(
+                aeronArchive.archiveId(),
+                metaDataBuffer.getLong(keyOffset + ControlSessionCounter.ARCHIVE_ID_KEY_OFFSET));
+            assertEquals(
+                aeronArchive.controlSessionId(),
+                metaDataBuffer.getLong(keyOffset + ControlSessionCounter.CONTROL_SESSION_ID_KEY_OFFSET));
+
+            final long responsePubRegistrationId = countersReader.getCounterReferenceId(counterId);
+            assertNotEquals(NULL_VALUE, responsePubRegistrationId);
+            final int responsePubCounterId = countersReader.findByTypeIdAndRegistrationId(
+                PublisherPos.PUBLISHER_POS_TYPE_ID, responsePubRegistrationId);
+            assertNotEquals(NULL_COUNTER_ID, responsePubCounterId);
+
+            final Publication requestPublication = aeronArchive.archiveProxy().publication();
+            assertEquals(ControlSessionCounter.NAME + ": name=" + clientName + " " +
+                AeronCounters.formatVersionInfo(AeronArchiveVersion.VERSION, AeronArchiveVersion.GIT_SHA) +
+                " sourceIdentity=aeron:ipc" +
+                " sessionId=" + requestPublication.sessionId() +
+                ArchiveCounters.ARCHIVE_ID_LABEL_SUFFIX + aeronArchive.archiveId(),
+                countersReader.getCounterLabel(counterId));
+
+            aeronArchive.close();
+
+            Tests.await(() -> countersReader.getCounterState(counterId) == RECORD_RECLAIMED);
         }
     }
 

@@ -20,20 +20,41 @@ import io.aeron.config.DefaultType;
 import io.aeron.exceptions.AeronException;
 import io.aeron.exceptions.ConcurrentConcludeException;
 import io.aeron.exceptions.DriverTimeoutException;
-import org.agrona.*;
+import io.aeron.logbuffer.LogBufferDescriptor;
+import org.agrona.BufferUtil;
+import org.agrona.CloseHelper;
+import org.agrona.DirectBuffer;
+import org.agrona.ErrorHandler;
+import org.agrona.IoUtil;
+import org.agrona.LangUtil;
+import org.agrona.MarkFile;
+import org.agrona.SemanticVersion;
+import org.agrona.SystemUtil;
 import org.agrona.concurrent.AtomicBuffer;
+import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.errors.DistinctErrorLog;
 import org.agrona.concurrent.errors.ErrorConsumer;
 import org.agrona.concurrent.errors.ErrorLogReader;
 import org.agrona.concurrent.errors.LoggingErrorHandler;
 import org.agrona.concurrent.ringbuffer.ManyToOneRingBuffer;
+import org.agrona.concurrent.ringbuffer.RingBufferDescriptor;
 
-import java.io.*;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.PrintStream;
+import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.nio.ByteBuffer;
 import java.nio.MappedByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.file.AccessDeniedException;
+import java.nio.file.FileSystemException;
+import java.nio.file.NoSuchFileException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Map;
@@ -42,10 +63,16 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
+import static io.aeron.CncFileDescriptor.CNC_FILE;
+import static io.aeron.CncFileDescriptor.TO_DRIVER_BUFFER_LENGTH_FIELD_OFFSET;
 import static io.aeron.CncFileDescriptor.cncVersionOffset;
+import static io.aeron.CncFileDescriptor.createToDriverBuffer;
 import static java.lang.Long.getLong;
 import static java.lang.System.getProperty;
+import static java.nio.channels.FileChannel.MapMode.READ_WRITE;
 import static java.nio.charset.StandardCharsets.US_ASCII;
+import static java.nio.file.StandardOpenOption.READ;
+import static java.nio.file.StandardOpenOption.WRITE;
 
 /**
  * This class provides the Media Driver and client with common configuration for the Aeron directory.
@@ -409,6 +436,12 @@ public class CommonContext implements Cloneable
     public static final String RESPONSE_CORRELATION_ID_PARAM_NAME = "response-correlation-id";
 
     /**
+     * Placeholder value to use in response channels where the publication is to be pre-created to reserve and hold
+     * onto the local port.
+     */
+    public static final String PROTOTYPE_CORRELATION_ID = "prototype";
+
+    /**
      * Parameter name to set explicit NAK delay (e.g. {@code nak-delay=200ms}).
      *
      * @since 1.44.0
@@ -421,6 +454,13 @@ public class CommonContext implements Cloneable
      * @since 1.45.0
      */
     public static final String UNTETHERED_WINDOW_LIMIT_TIMEOUT_PARAM_NAME = "untethered-window-limit-timeout";
+
+    /**
+     * Parameter name to set explicit untethered linger timeout, e.g. {@code untethered-linger-timeout=10s}.
+     *
+     * @since 1.48.0
+     */
+    public static final String UNTETHERED_LINGER_TIMEOUT_PARAM_NAME = "untethered-linger-timeout";
 
     /**
      * Parameter name to set explicit untethered resting timeout, e.g. {@code untethered-resting-timeout=10s}.
@@ -444,7 +484,7 @@ public class CommonContext implements Cloneable
     public static final String STREAM_ID_PARAM_NAME = "stream-id";
 
     /**
-     *  Parameter name for the publication window length, i.e. how far ahead can publication accept offers.
+     * Parameter name for the publication window length, i.e. how far ahead can publication accept offers.
      *
      * @since 1.47.0
      */
@@ -493,18 +533,12 @@ public class CommonContext implements Cloneable
     public static PrintStream fallbackLogger()
     {
         final String fallbackLoggerName = getProperty(FALLBACK_LOGGER_PROP_NAME, "stderr");
-        switch (fallbackLoggerName)
+        return switch (fallbackLoggerName)
         {
-            case "stdout":
-                return System.out;
-
-            case "no_op":
-                return NO_OP_LOGGER;
-
-            case "stderr":
-            default:
-                return System.err;
-        }
+            case "stdout" -> System.out;
+            case "no_op" -> NO_OP_LOGGER;
+            default -> System.err;
+        };
     }
 
     private static final PrintStream NO_OP_LOGGER = new PrintStream(
@@ -517,6 +551,7 @@ public class CommonContext implements Cloneable
         });
     private static final Map<String, Boolean> DEBUG_FIELDS_SEEN = new ConcurrentHashMap<>();
     private static final VarHandle IS_CONCLUDED_VH;
+
     static
     {
         try
@@ -898,7 +933,7 @@ public class CommonContext implements Cloneable
     {
         final File cncFile = new File(aeronDirectory, CncFileDescriptor.CNC_FILE);
 
-        if (cncFile.exists() && cncFile.length() > CncFileDescriptor.END_OF_METADATA_OFFSET)
+        if (cncFile.exists() && cncFile.length() > CncFileDescriptor.META_DATA_LENGTH)
         {
             if (null != logger)
             {
@@ -914,7 +949,7 @@ public class CommonContext implements Cloneable
     /**
      * Is a media driver active in the given directory?
      *
-     * @param directory       to check
+     * @param directory       to check.
      * @param driverTimeoutMs for the driver liveness check.
      * @param logger          for feedback as liveness checked.
      * @return true if a driver is active or false if not.
@@ -924,7 +959,7 @@ public class CommonContext implements Cloneable
     {
         final File cncFile = new File(directory, CncFileDescriptor.CNC_FILE);
 
-        if (cncFile.exists() && cncFile.length() > CncFileDescriptor.END_OF_METADATA_OFFSET)
+        if (cncFile.exists() && cncFile.length() > CncFileDescriptor.META_DATA_LENGTH)
         {
             logger.accept("INFO: Aeron CnC file exists: " + cncFile);
 
@@ -1024,7 +1059,7 @@ public class CommonContext implements Cloneable
     {
         final File cncFile = new File(directory, CncFileDescriptor.CNC_FILE);
 
-        if (cncFile.exists() && cncFile.length() > CncFileDescriptor.END_OF_METADATA_OFFSET)
+        if (cncFile.exists() && cncFile.length() > CncFileDescriptor.META_DATA_LENGTH)
         {
             final MappedByteBuffer cncByteBuffer = IoUtil.mapExistingFile(cncFile, "CnC file");
             try
@@ -1204,6 +1239,143 @@ public class CommonContext implements Cloneable
         return setupErrorHandler(userErrorHandler, errorLog, fallbackLogger());
     }
 
+    /**
+     * Connect to the media driver and extract file page size from the C'n'C file.
+     *
+     * @param aeronDirectory where driver is running.
+     * @param clock          to use.
+     * @param timeoutMs      for awaiting connection.
+     * @return file page size from running media driver or {@link LogBufferDescriptor#PAGE_MIN_SIZE} if driver is old.
+     * @since 1.48.0
+     */
+    public static int driverFilePageSize(final File aeronDirectory, final EpochClock clock, final long timeoutMs)
+    {
+        final UnsafeBuffer metadata =
+            awaitCncFileCreation(new File(aeronDirectory, CNC_FILE), clock, clock.time() + timeoutMs);
+        try
+        {
+            return driverFilePageSize(metadata);
+        }
+        finally
+        {
+            BufferUtil.free(metadata);
+        }
+    }
+
+    /**
+     * Connect to the media driver and get the {@code nextCorrelationId}.
+     *
+     * @param aeronDirectory where driver is running.
+     * @param clock          to use.
+     * @param timeoutMs      for awaiting connection.
+     * @return next correlation id.
+     * @since 1.48.0
+     */
+    public static long nextCorrelationId(final File aeronDirectory, final EpochClock clock, final long timeoutMs)
+    {
+        final UnsafeBuffer metadata =
+            awaitCncFileCreation(new File(aeronDirectory, CNC_FILE), clock, clock.time() + timeoutMs);
+        try
+        {
+            final int correlationIdOffset =
+                metadata.getInt(TO_DRIVER_BUFFER_LENGTH_FIELD_OFFSET) - RingBufferDescriptor.TRAILER_LENGTH +
+                RingBufferDescriptor.CORRELATION_COUNTER_OFFSET;
+            final UnsafeBuffer toDriverBuffer = createToDriverBuffer(metadata.byteBuffer(), metadata);
+            return toDriverBuffer.getAndAddLong(correlationIdOffset, 1);
+        }
+        finally
+        {
+            BufferUtil.free(metadata);
+        }
+    }
+
+    static int driverFilePageSize(final DirectBuffer metadata)
+    {
+        final int pageSize = CncFileDescriptor.filePageSize(metadata);
+        return 0 != pageSize ? pageSize : LogBufferDescriptor.PAGE_MIN_SIZE;
+    }
+
+    @SuppressWarnings("try")
+    static UnsafeBuffer awaitCncFileCreation(
+        final File cncFile, final EpochClock clock, final long deadlineMs)
+    {
+        while (true)
+        {
+            while (!cncFile.exists() || cncFile.length() < CncFileDescriptor.META_DATA_LENGTH)
+            {
+                if (clock.time() > deadlineMs)
+                {
+                    throw new DriverTimeoutException("CnC file not created: " + cncFile.getAbsolutePath());
+                }
+
+                sleep(Aeron.Configuration.IDLE_SLEEP_DEFAULT_MS);
+            }
+
+            try (FileChannel fileChannel = FileChannel.open(cncFile.toPath(), READ, WRITE))
+            {
+                final long fileSize = fileChannel.size();
+                if (fileSize < CncFileDescriptor.META_DATA_LENGTH)
+                {
+                    if (clock.time() > deadlineMs)
+                    {
+                        throw new DriverTimeoutException(
+                            "CnC file is created but not populated: " + cncFile.getAbsolutePath());
+                    }
+
+                    fileChannel.close();
+                    sleep(Aeron.Configuration.IDLE_SLEEP_DEFAULT_MS);
+                    continue;
+                }
+
+                final UnsafeBuffer metaDataBuffer =
+                    CncFileDescriptor.createMetaDataBuffer(fileChannel.map(READ_WRITE, 0, fileSize));
+
+                int cncVersion;
+                while (0 == (cncVersion = metaDataBuffer.getIntVolatile(CncFileDescriptor.cncVersionOffset(0))))
+                {
+                    if (clock.time() > deadlineMs)
+                    {
+                        throw new DriverTimeoutException("CnC file is created but not initialised: " +
+                            cncFile.getAbsolutePath());
+                    }
+
+                    sleep(Aeron.Configuration.AWAITING_IDLE_SLEEP_MS);
+                }
+
+                CncFileDescriptor.checkVersion(cncVersion);
+                if (SemanticVersion.minor(cncVersion) < SemanticVersion.minor(CncFileDescriptor.CNC_VERSION))
+                {
+                    throw new AeronException("driverVersion=" + SemanticVersion.toString(cncVersion) +
+                        " insufficient for clientVersion=" +
+                        SemanticVersion.toString(CncFileDescriptor.CNC_VERSION));
+                }
+
+                return metaDataBuffer;
+            }
+            catch (final NoSuchFileException | AccessDeniedException ignore)
+            {
+            }
+            catch (final FileSystemException ex)
+            {
+                // JDK exception translation does not handle `ERROR_SHARING_VIOLATION (32)` and returns
+                // FileSystemException with the error "The process cannot access the file because it is being
+                // used by another process.". Our current thinking is that matching by text is too brittle due
+                // to error message being locale-sensitive on Windows. Therefore, we are going to retry on any
+                // FileSystemException when running on Windows.
+                if (SystemUtil.isWindows())
+                {
+                    continue;
+                }
+
+                throw new AeronException(cncFileErrorMessage(cncFile, ex), ex);
+            }
+            catch (final IOException ex)
+            {
+                throw new AeronException(cncFileErrorMessage(cncFile, ex), ex);
+            }
+        }
+    }
+
     static ErrorHandler setupErrorHandler(
         final ErrorHandler userErrorHandler, final DistinctErrorLog errorLog, final PrintStream fallbackErrorStream)
     {
@@ -1229,6 +1401,11 @@ public class CommonContext implements Cloneable
             Thread.currentThread().interrupt();
             throw new AeronException("unexpected interrupt", ex);
         }
+    }
+
+    private static String cncFileErrorMessage(final File file, final Exception ex)
+    {
+        return "cannot open CnC file: " + file.getAbsolutePath() + " reason=" + ex;
     }
 
     private static final class ErrorHandlerWrapper implements ErrorHandler, AutoCloseable

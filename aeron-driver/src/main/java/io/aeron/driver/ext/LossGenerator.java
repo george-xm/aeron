@@ -48,13 +48,13 @@ public interface LossGenerator
      * @return true to drop, false to process
      */
     default boolean shouldDropFrame(
-        InetSocketAddress address,
-        UnsafeBuffer buffer,
+        final InetSocketAddress address,
+        final UnsafeBuffer buffer,
         final int streamId,
         final int sessionId,
-        int termId,
-        int termOffset,
-        int length)
+        final int termId,
+        final int termOffset,
+        final int length)
     {
         return shouldDropFrame(address, buffer, length);
     }

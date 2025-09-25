@@ -173,13 +173,15 @@ class MultiModuleSharedDriverTest
                     .aeronDirectoryName(node0.archivingMediaDriver.mediaDriver().aeronDirectoryName())
                     .egressListener(egressListener)
                     .ingressChannel("aeron:udp?term-length=64k")
-                    .ingressEndpoints(TestCluster.ingressEndpoints(0, 2))
+                    .ingressEndpoints(TestCluster.ingressEndpoints(
+                        node0.consensusModule0.context().clusterId(), 0, 2, 2))
                     .egressChannel("aeron:udp?endpoint=localhost:0"));
                 AeronCluster client1 = AeronCluster.connect(new AeronCluster.Context()
                     .aeronDirectoryName(node1.archivingMediaDriver.mediaDriver().aeronDirectoryName())
                     .egressListener(egressListener)
                     .ingressChannel("aeron:udp?term-length=64k")
-                    .ingressEndpoints(TestCluster.ingressEndpoints(1, 2))
+                    .ingressEndpoints(TestCluster.ingressEndpoints(
+                        node1.consensusModule1.context().clusterId(), 0, 2, 2))
                     .egressChannel("aeron:udp?endpoint=localhost:0")))
             {
                 echoMessage(client0, "Message 0", egress);
@@ -244,7 +246,7 @@ class MultiModuleSharedDriverTest
             nameResolver = new RedirectingNameResolver(TestCluster.DEFAULT_NODE_MAPPINGS);
 
             final MediaDriver.Context driverCtx = new MediaDriver.Context()
-                .aeronDirectoryName(CommonContext.getAeronDirectoryName() + "-" + nodeId)
+                .aeronDirectoryName(CommonContext.generateRandomDirName())
                 .threadingMode(ThreadingMode.SHARED)
                 .nameResolver(nameResolver)
                 .dirDeleteOnStart(true);
@@ -292,7 +294,7 @@ class MultiModuleSharedDriverTest
                 .deleteDirOnStart(true)
                 .aeronDirectoryName(aeronDirectoryName)
                 .clusterDir(new File(SystemUtil.tmpDirName(), "cluster-" + nodeId + "-" + clusterId))
-                .clusterMembers(TestCluster.clusterMembers(clusterId, 2))
+                .clusterMembers(TestCluster.clusterMembers(clusterId, 0, 2, 2, false))
                 .logChannel("aeron:udp?term-length=64k")
                 .serviceStreamId(104 + nodeOffset)
                 .consensusModuleStreamId(105 + nodeOffset)

@@ -17,9 +17,11 @@ package io.aeron;
 
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
+import io.aeron.driver.status.SystemCounterDescriptor;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.LogBufferDescriptor;
 import io.aeron.protocol.DataHeaderFlyweight;
+import io.aeron.test.EventLogExtension;
 import io.aeron.test.InterruptAfter;
 import io.aeron.test.InterruptingTestCallback;
 import io.aeron.test.SystemTestWatcher;
@@ -28,21 +30,26 @@ import io.aeron.test.driver.TestMediaDriver;
 import org.agrona.CloseHelper;
 import org.agrona.collections.MutableInteger;
 import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.concurrent.status.CountersReader;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static java.util.Arrays.asList;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
-@ExtendWith(InterruptingTestCallback.class)
+@ExtendWith({ EventLogExtension.class, InterruptingTestCallback.class })
 class SpySimulatedConnectionTest
 {
     private static List<String> channels()
@@ -80,13 +87,16 @@ class SpySimulatedConnectionTest
 
     private void launch()
     {
-        driverContext.publicationTermBufferLength(TERM_BUFFER_LENGTH)
+        driverContext
+            .aeronDirectoryName(CommonContext.generateRandomDirName())
+            .publicationTermBufferLength(TERM_BUFFER_LENGTH)
             .errorHandler(Tests::onError)
             .dirDeleteOnStart(true)
             .threadingMode(ThreadingMode.SHARED);
 
         driver = TestMediaDriver.launch(driverContext, watcher);
-        client = Aeron.connect();
+        watcher.dataCollector().add(driver.context().aeronDirectory());
+        client = Aeron.connect(new Aeron.Context().aeronDirectoryName(driverContext.aeronDirectoryName()));
     }
 
     @AfterEach
@@ -274,6 +284,97 @@ class SpySimulatedConnectionTest
         }
 
         assertEquals(messagesToSend, fragmentCountSpy.value);
+    }
+
+    @Test
+    @InterruptAfter(10)
+    void shouldNotHaveShortSendsWithMDCPublication()
+    {
+        launch();
+
+        final String channel = "aeron:udp?control=localhost:40456|control-mode=dynamic";
+
+        spy = client.addSubscription(spyForChannel(channel), STREAM_ID);
+        publication = client.addExclusivePublication(channel + "|ssc=true", STREAM_ID);
+
+        while (!spy.isConnected() || !publication.isConnected())
+        {
+            Tests.yield();
+        }
+
+        while (publication.offer(buffer, 0, buffer.capacity()) < 0L)
+        {
+            Tests.yield();
+        }
+
+        final FragmentHandler mockFragmentHandler = mock(FragmentHandler.class);
+
+        while (spy.poll(mockFragmentHandler, 1) == 0)
+        {
+            Tests.yield();
+        }
+
+        assertEquals(0, driver.counters().getCounterValue(SystemCounterDescriptor.SHORT_SENDS.id()));
+    }
+
+    @ParameterizedTest
+    @MethodSource("channels")
+    @InterruptAfter(10)
+    void shouldNotChangeConnectionStatusOnPublicationIfNormalSubscriberGoesAway(final String channel)
+        throws InterruptedException
+    {
+        launch();
+
+        spy = client.addSubscription(spyForChannel(channel), STREAM_ID);
+        subscription = client.addSubscription(channel, STREAM_ID);
+        publication = client.addPublication(channel + "|ssc=true", STREAM_ID);
+
+        Tests.awaitConnected(publication);
+        Tests.awaitConnected(spy);
+        Tests.awaitConnected(subscription);
+
+        for (int i = 0; i < 5; i++)
+        {
+            while (publication.offer(buffer, 0, buffer.capacity()) < 0L)
+            {
+                Tests.yield();
+            }
+        }
+
+        final AtomicBoolean running = new AtomicBoolean(true);
+        final AtomicBoolean detectedDisconnect = new AtomicBoolean();
+        final CountDownLatch latch = new CountDownLatch(1);
+        final Thread connectionChecker = new Thread(() ->
+        {
+            try (LogBuffers logBuffers = new LogBuffers(
+                driver.aeronDirectoryName() + "/publications/" + publication.registrationId() + ".logbuffer"))
+            {
+                latch.countDown();
+                while (running.get())
+                {
+                    if (!LogBufferDescriptor.isConnected(logBuffers.metaDataBuffer()))
+                    {
+                        detectedDisconnect.set(true);
+                        break;
+                    }
+                }
+            }
+        });
+        connectionChecker.start();
+        latch.await();
+
+        final Image image = subscription.imageBySessionId(publication.sessionId());
+        final int subPosCounterId = image.subscriberPositionId();
+        subscription.close();
+        Tests.await(() -> client.countersReader().getCounterState(subPosCounterId) == CountersReader.RECORD_RECLAIMED);
+
+        running.set(false);
+        connectionChecker.join();
+
+        assertFalse(detectedDisconnect.get(), "connection status changed unexpectedly");
+        assertTrue(publication.isConnected(), "connection status changed unexpectedly");
+        assertFalse(publication.isClosed());
+        assertTrue(spy.isConnected());
     }
 
     private void waitUntilFullConnectivity()

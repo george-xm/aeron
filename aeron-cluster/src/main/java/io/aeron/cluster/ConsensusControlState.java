@@ -22,72 +22,18 @@ import io.aeron.ExclusivePublication;
  * <p>
  * This is a record object being passed to external entities.
  *
+ * @param logPublication        publication or null.
+ * @param logRecordingId        log recording id.
+ * @param leadershipTermId      leadership term id.
  * @see ConsensusModuleExtension
  */
-public final class ConsensusControlState
+public record ConsensusControlState(ExclusivePublication logPublication, long logRecordingId, long leadershipTermId)
 {
-    private final ExclusivePublication logPublication;
-    private final long logRecordingId;
-    private final long leadershipTermId;
-    private final String leaderLocalLogChannel;
-
-    /**
-     * Record constructor.
-     *
-     * @param logPublication        publication or null.
-     * @param logRecordingId        log recording id.
-     * @param leadershipTermId      leadership term id.
-     * @param leaderLocalLogChannel leader local log channel or null.
-     */
-    ConsensusControlState(
-        final ExclusivePublication logPublication,
-        final long logRecordingId,
-        final long leadershipTermId,
-        final String leaderLocalLogChannel)
-    {
-        this.logPublication = logPublication;
-        this.logRecordingId = logRecordingId;
-        this.leadershipTermId = leadershipTermId;
-        this.leaderLocalLogChannel = leaderLocalLogChannel;
-    }
-
     /**
      * @return true iff we are the leader (and have the log publication).
      */
     public boolean isLeader()
     {
         return null != logPublication;
-    }
-
-    /**
-     * @return log publication or null if follower.
-     */
-    public ExclusivePublication logPublication()
-    {
-        return logPublication;
-    }
-
-    /**
-     * @return log recording id.
-     */
-    public long logRecordingId()
-    {
-        return logRecordingId;
-    }
-
-    /**
-     * @return leadership term id.
-     */
-    public long leadershipTermId()
-    {
-        return leadershipTermId;
-    }
-
-    /**
-     * @return the local log channel (for services or extension). Only applicable for a leader.
-     */
-    public String leaderLocalLogChannel()
-    {
-        return leaderLocalLogChannel;
     }
 }

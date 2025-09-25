@@ -17,48 +17,82 @@ package io.aeron.archive;
 
 import io.aeron.Aeron;
 import io.aeron.ExclusivePublication;
+import io.aeron.archive.client.ArchiveEvent;
+import io.aeron.exceptions.AeronException;
 import io.aeron.security.Authenticator;
+import io.aeron.security.AuthorisationService;
 import org.agrona.concurrent.CachedEpochClock;
+import org.agrona.concurrent.CountedErrorHandler;
+import org.agrona.concurrent.SystemEpochClock;
+import org.agrona.concurrent.SystemNanoClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 
 import java.util.concurrent.TimeUnit;
 
 import static io.aeron.archive.ControlSession.State.DONE;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class ControlSessionTest
 {
     private static final long CONTROL_PUBLICATION_ID = 777;
+    private static final long COUNTER_REGISTRATION_ID = 333;
     private static final long CONNECT_TIMEOUT_MS = TimeUnit.SECONDS.toMillis(5);
     private static final long SESSION_LIVENESS_CHECK_INTERVAL_NS = TimeUnit.MILLISECONDS.toNanos(100);
+    private static final int CONTROL_SESSION_ID = 42;
+    private static final int CORRELATION_ID = 2;
+    private static final int CONTROL_PUBLICATION_STREAM_ID = 5555;
+    private static final String CONTROL_PUBLICATION_CHANNEL = "aeron:ipc?alias=test-control-response";
 
     private final ControlSessionAdapter mockDemuxer = mock(ControlSessionAdapter.class);
-    private final ArchiveConductor mockConductor = mock(ArchiveConductor.class);
+    private ArchiveConductor archiveConductor;
+    private final CountedErrorHandler mockErrorHandler = mock(CountedErrorHandler.class);
     private final Aeron mockAeron = mock(Aeron.class);
     private final ExclusivePublication mockControlPublication = mock(ExclusivePublication.class);
     private final ControlResponseProxy mockProxy = mock(ControlResponseProxy.class);
     private final ControlSessionProxy mockSessionProxy = mock(ControlSessionProxy.class);
     private final Authenticator mockAuthenticator = mock(Authenticator.class);
+    private final AuthorisationService mockAuthorisationService = mock(AuthorisationService.class);
     private final CachedEpochClock cachedEpochClock = new CachedEpochClock();
     private ControlSession session;
 
     @BeforeEach
     void before()
     {
+        archiveConductor = new SharedModeArchiveConductor(new Archive.Context()
+            .countedErrorHandler(mockErrorHandler)
+            .nanoClock(SystemNanoClock.INSTANCE)
+            .epochClock(SystemEpochClock.INSTANCE)
+            .aeron(mockAeron)
+            .authenticatorSupplier(() -> mockAuthenticator)
+            .authorisationServiceSupplier(() -> mockAuthorisationService)
+            .controlChannelEnabled(false));
+
         session = new ControlSession(
-            1,
-            2,
+            CONTROL_SESSION_ID,
+            CORRELATION_ID,
             CONNECT_TIMEOUT_MS,
             SESSION_LIVENESS_CHECK_INTERVAL_NS,
             CONTROL_PUBLICATION_ID,
+            COUNTER_REGISTRATION_ID,
+            CONTROL_PUBLICATION_CHANNEL,
+            CONTROL_PUBLICATION_STREAM_ID,
             null,
             mockDemuxer,
             mockAeron,
-            mockConductor,
+            archiveConductor,
             cachedEpochClock,
             mockProxy,
             mockAuthenticator,
@@ -95,5 +129,142 @@ class ControlSessionTest
         session.doWork();
         assertEquals(DONE, session.state());
         assertTrue(session.isDone());
+    }
+
+    @Test
+    void shouldChangeStateAndCaptureAbortReason()
+    {
+        assertFalse(session.isDone());
+        assertFalse(session.hasActiveListing());
+
+        final String reason = "stop execution";
+        session.abort(reason);
+
+        assertTrue(session.isDone());
+        assertEquals(DONE, session.state());
+        assertSame(reason, session.abortReason());
+    }
+
+    @Test
+    void shouldChangeStateCaptureAbortReasonAndAbortActiveListing()
+    {
+        assertFalse(session.isDone());
+        assertFalse(session.hasActiveListing());
+        final Session listingSession = mock(Session.class);
+        session.activeListing(listingSession);
+
+        final String reason = "stop execution";
+        session.abort(reason);
+
+        assertTrue(session.isDone());
+        assertEquals(DONE, session.state());
+        assertSame(reason, session.abortReason());
+        verify(listingSession).abort(reason);
+    }
+
+    @Test
+    void abortIsANoOpIfSessionIsDone()
+    {
+        assertFalse(session.isDone());
+        assertFalse(session.hasActiveListing());
+        final Session listingSession = mock(Session.class);
+        session.activeListing(listingSession);
+
+        session.state(ControlSession.State.DONE, "test");
+
+        session.abort(ControlSession.SESSION_CLOSED_MSG);
+
+        assertTrue(session.isDone());
+        assertEquals(DONE, session.state());
+        assertNull(session.abortReason());
+        verifyNoInteractions(listingSession);
+    }
+
+    @Test
+    void abortShouldIgnoreAdditionalCalls()
+    {
+        assertFalse(session.isDone());
+        assertFalse(session.hasActiveListing());
+        final Session listingSession = mock(Session.class);
+        session.activeListing(listingSession);
+
+        final String reason1 = "call1";
+        session.abort(reason1);
+        session.abort("call2");
+        session.abort("call3");
+
+        assertTrue(session.isDone());
+        assertEquals(DONE, session.state());
+        assertEquals(reason1, session.abortReason());
+        verify(listingSession).abort(reason1);
+    }
+
+    @Test
+    void cleanTerminationCannotBeAborted()
+    {
+        assertFalse(session.isDone());
+        assertFalse(session.hasActiveListing());
+        final Session listingSession = mock(Session.class);
+        session.activeListing(listingSession);
+
+        session.abort(ControlSession.SESSION_CLOSED_MSG);
+        session.abort("call2");
+        session.abort("call3");
+
+        assertTrue(session.isDone());
+        assertEquals(DONE, session.state());
+        assertEquals(ControlSession.SESSION_CLOSED_MSG, session.abortReason());
+        verify(listingSession).abort(ControlSession.SESSION_CLOSED_MSG);
+    }
+
+    @Test
+    void cleanTerminationCanOverwritePreviousAbortMessage()
+    {
+        assertFalse(session.isDone());
+        assertFalse(session.hasActiveListing());
+        final Session listingSession = mock(Session.class);
+        session.activeListing(listingSession);
+
+        session.abort("call1");
+        session.abort(ControlSession.SESSION_CLOSED_MSG);
+        session.abort("call3");
+
+        assertTrue(session.isDone());
+        assertEquals(DONE, session.state());
+        assertEquals(ControlSession.SESSION_CLOSED_MSG, session.abortReason());
+        verify(listingSession).abort(ControlSession.SESSION_CLOSED_MSG);
+        verify(listingSession).abort("call1");
+    }
+
+    @Test
+    void shouldLogWarningIfSessionIsAborted()
+    {
+        final String abortReason = "test abort reason";
+        session.abort(abortReason);
+
+        session.close();
+
+        final ArgumentCaptor<Throwable> error = ArgumentCaptor.forClass(Throwable.class);
+        verify(mockErrorHandler).onError(error.capture());
+        final Throwable throwable = error.getValue();
+        final ArchiveEvent event = assertInstanceOf(ArchiveEvent.class, throwable);
+        assertEquals(AeronException.Category.WARN, event.category());
+        assertEquals("WARN - controlSessionId=" + CONTROL_SESSION_ID + " (controlResponseStreamId=" +
+            CONTROL_PUBLICATION_STREAM_ID + " controlResponseChannel=" + CONTROL_PUBLICATION_CHANNEL +
+            ") terminated: " + abortReason, event.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        ControlSession.SESSION_CLOSED_MSG,
+        ControlSession.RESPONSE_NOT_CONNECTED_MSG,
+        ControlSession.REQUEST_IMAGE_NOT_AVAILABLE_MSG + " : abc" })
+    void shouldNotLogWarningIfDisconnectedOrClosed(final String reason)
+    {
+        session.abort(reason);
+
+        session.close();
+
+        verifyNoInteractions(mockErrorHandler);
     }
 }

@@ -15,8 +15,10 @@
  */
 package io.aeron.driver;
 
+import io.aeron.Aeron;
 import io.aeron.CommonContext;
 import io.aeron.driver.buffer.RawLog;
+import io.aeron.driver.status.SystemCounters;
 import io.aeron.logbuffer.LogBufferDescriptor;
 import io.aeron.logbuffer.LogBufferUnblocker;
 import org.agrona.CloseHelper;
@@ -28,9 +30,12 @@ import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.concurrent.status.Position;
 import org.agrona.concurrent.status.ReadablePosition;
 
-import java.util.ArrayList;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.util.*;
 
-import static io.aeron.driver.status.SystemCounterDescriptor.UNBLOCKED_PUBLICATIONS;
+import static io.aeron.ErrorCode.IMAGE_REJECTED;
+import static io.aeron.driver.status.SystemCounterDescriptor.*;
 import static io.aeron.logbuffer.LogBufferDescriptor.*;
 import static org.agrona.BitUtil.SIZE_OF_LONG;
 
@@ -39,18 +44,23 @@ import static org.agrona.BitUtil.SIZE_OF_LONG;
  */
 public final class IpcPublication implements DriverManagedResource, Subscribable
 {
+    @SuppressWarnings("JavadocVariable")
     enum State
     {
         ACTIVE, DRAINING, LINGER, DONE
     }
 
     private static final ReadablePosition[] EMPTY_POSITIONS = new ReadablePosition[0];
+    private static final InetSocketAddress IPC_SRC_ADDRESS = new InetSocketAddress(InetAddress.getLoopbackAddress(), 0);
 
     private final long registrationId;
     private final long tag;
     private final long unblockTimeoutNs;
     private final long untetheredWindowLimitTimeoutNs;
+    private final long untetheredLingerTimeoutNs;
     private final long untetheredRestingTimeoutNs;
+    private final long imageLivenessTimeoutNs;
+    private final long responseCorrelationId;
     private final String channel;
     private final int sessionId;
     private final int streamId;
@@ -69,6 +79,8 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
     private long cleanPosition;
     private int refCount = 0;
     private boolean reachedEndOfLife = false;
+    private boolean inCoolDown = false;
+    private long coolDownExpireTimeNs = 0;
     private final boolean isExclusive;
     private State state = State.ACTIVE;
     private final UnsafeBuffer[] termBuffers;
@@ -79,6 +91,7 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
     private final ArrayList<UntetheredSubscription> untetheredSubscriptions = new ArrayList<>();
     private final RawLog rawLog;
     private final AtomicCounter unblockedPublications;
+    private final AtomicCounter publicationsRevoked;
     private final ErrorHandler errorHandler;
 
     IpcPublication(
@@ -116,9 +129,16 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
         this.publisherLimit = publisherLimit;
         this.rawLog = rawLog;
         this.unblockTimeoutNs = ctx.publicationUnblockTimeoutNs();
-        this.untetheredWindowLimitTimeoutNs = params.untetheredWindowLimitTimeoutNs;
-        this.untetheredRestingTimeoutNs = params.untetheredRestingTimeoutNs;
-        this.unblockedPublications = ctx.systemCounters().get(UNBLOCKED_PUBLICATIONS);
+        untetheredWindowLimitTimeoutNs = params.untetheredWindowLimitTimeoutNs;
+        untetheredLingerTimeoutNs = params.untetheredLingerTimeoutNs;
+        untetheredRestingTimeoutNs = params.untetheredRestingTimeoutNs;
+        this.imageLivenessTimeoutNs = ctx.imageLivenessTimeoutNs();
+        this.responseCorrelationId = params.responseCorrelationId;
+
+        final SystemCounters systemCounters = ctx.systemCounters();
+        this.unblockedPublications = systemCounters.get(UNBLOCKED_PUBLICATIONS);
+        this.publicationsRevoked = systemCounters.get(PUBLICATIONS_REVOKED);
+
         this.metaDataBuffer = rawLog.metaData();
 
         consumerPosition = producerPosition();
@@ -242,6 +262,36 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
         }
     }
 
+    void reject(final long position, final String reason, final DriverConductor conductor, final long nowNs)
+    {
+        conductor.onPublicationError(
+            registrationId,
+            Aeron.NULL_VALUE,
+            sessionId(),
+            streamId(),
+            Aeron.NULL_VALUE,
+            Aeron.NULL_VALUE,
+            IPC_SRC_ADDRESS,
+            IMAGE_REJECTED.value(),
+            reason);
+
+        if (!inCoolDown)
+        {
+            updateConnectedStatus(false);
+
+            conductor.unlinkIpcSubscriptions(this);
+
+            CloseHelper.closeAll(errorHandler, subscriberPositions);
+            subscriberPositions = EMPTY_POSITIONS;
+
+            untetheredSubscriptions.clear();
+
+            inCoolDown = true;
+        }
+
+        coolDownExpireTimeNs = nowNs + imageLivenessTimeoutNs;
+    }
+
     /**
      * {@inheritDoc}
      */
@@ -254,7 +304,7 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
             untetheredSubscriptions.add(new UntetheredSubscription(subscriptionLink, subscriberPosition, nowNs));
         }
 
-        LogBufferDescriptor.isConnected(metaDataBuffer, true);
+        updateConnectedStatus(true);
     }
 
     /**
@@ -262,14 +312,8 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
      */
     public void removeSubscriber(final SubscriptionLink subscriptionLink, final ReadablePosition subscriberPosition)
     {
-        updatePublisherPositionAndLimit();
         subscriberPositions = ArrayUtil.remove(subscriberPositions, subscriberPosition);
         subscriberPosition.close();
-
-        if (subscriberPositions.length == 0)
-        {
-            LogBufferDescriptor.isConnected(metaDataBuffer, false);
-        }
 
         if (!subscriptionLink.isTether())
         {
@@ -282,6 +326,11 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
                 }
             }
         }
+
+        if (0 == subscriberPositions.length)
+        {
+            updateConnectedStatus(false);
+        }
     }
 
     /**
@@ -293,20 +342,39 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
         {
             case ACTIVE:
             {
-                final long producerPosition = producerPosition();
-                publisherPos.setOrdered(producerPosition);
-                if (!isExclusive)
+                if (isPublicationRevoked(metaDataBuffer))
                 {
-                    checkForBlockedPublisher(producerPosition, timeNs);
+                    final long revokedPos = producerPosition();
+                    publisherLimit.setRelease(revokedPos);
+                    LogBufferDescriptor.endOfStreamPosition(metaDataBuffer, revokedPos);
+                    updateConnectedStatus(false);
+
+                    conductor.transitionToLinger(this);
+
+                    state = State.LINGER;
+
+                    logRevoke(revokedPos, sessionId(), streamId(), channel());
+                    publicationsRevoked.increment();
                 }
-                checkUntetheredSubscriptions(timeNs, conductor);
+                else
+                {
+                    checkUntetheredSubscriptions(timeNs, conductor);
+                    updateConnectedStatus(0 != subscriberPositions.length);
+                    final long producerPosition = producerPosition();
+                    publisherPos.setRelease(producerPosition);
+                    if (!isExclusive)
+                    {
+                        checkForBlockedPublisher(producerPosition, timeNs);
+                    }
+                    checkCoolDownStatus(timeNs, conductor);
+                }
                 break;
             }
 
             case DRAINING:
             {
                 final long producerPosition = producerPosition();
-                publisherPos.setOrdered(producerPosition);
+                publisherPos.setRelease(producerPosition);
                 if (isDrained(producerPosition))
                 {
                     conductor.transitionToLinger(this);
@@ -314,15 +382,18 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
                 }
                 else if (LogBufferUnblocker.unblock(termBuffers, metaDataBuffer, consumerPosition, termBufferLength))
                 {
-                    unblockedPublications.incrementOrdered();
+                    unblockedPublications.incrementRelease();
                 }
                 break;
             }
 
             case LINGER:
-                conductor.cleanupIpcPublication(this);
-                reachedEndOfLife = true;
-                state = State.DONE;
+                if (0 == refCount)
+                {
+                    conductor.cleanupIpcPublication(this);
+                    reachedEndOfLife = true;
+                    state = State.DONE;
+                }
                 break;
 
             case DONE:
@@ -338,6 +409,11 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
         return reachedEndOfLife;
     }
 
+    void revoke()
+    {
+        LogBufferDescriptor.isPublicationRevoked(metaDataBuffer, true);
+    }
+
     void incRef()
     {
         ++refCount;
@@ -348,9 +424,13 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
         if (0 == --refCount)
         {
             final long producerPosition = producerPosition();
-            publisherLimit.setOrdered(producerPosition);
+            publisherLimit.setRelease(producerPosition);
             LogBufferDescriptor.endOfStreamPosition(metaDataBuffer, producerPosition);
-            state = State.DRAINING;
+
+            if (!LogBufferDescriptor.isPublicationRevoked(metaDataBuffer))
+            {
+                state = State.DRAINING;
+            }
         }
     }
 
@@ -361,7 +441,7 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
         if (State.ACTIVE == state)
         {
             final long producerPosition = producerPosition();
-            publisherPos.setOrdered(producerPosition);
+            publisherPos.setRelease(producerPosition);
 
             if (subscriberPositions.length > 0)
             {
@@ -380,20 +460,21 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
                     consumerPosition = maxSubscriberPosition;
                 }
 
-                final long proposedLimit = minSubscriberPosition + termWindowLength;
-                if (proposedLimit > tripLimit)
+                final long newLimitPosition = minSubscriberPosition + termWindowLength;
+                if (newLimitPosition >= tripLimit)
                 {
                     cleanBufferTo(minSubscriberPosition);
-                    publisherLimit.setOrdered(proposedLimit);
-                    tripLimit = proposedLimit + tripGain;
+                    publisherLimit.setRelease(newLimitPosition);
+                    tripLimit = newLimitPosition + tripGain;
                     workCount = 1;
                 }
             }
             else if (publisherLimit.get() > consumerPosition)
             {
                 tripLimit = consumerPosition;
-                publisherLimit.setOrdered(consumerPosition);
+                publisherLimit.setRelease(consumerPosition);
                 cleanBufferTo(consumerPosition);
+                workCount = 1;
             }
         }
 
@@ -432,7 +513,12 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
 
     boolean isAcceptingSubscriptions()
     {
-        return State.ACTIVE == state || (State.DRAINING == state && !isDrained(producerPosition()));
+        return !inCoolDown && (State.ACTIVE == state || (State.DRAINING == state && !isDrained(producerPosition())));
+    }
+
+    long responseCorrelationId()
+    {
+        return responseCorrelationId;
     }
 
     private void checkUntetheredSubscriptions(final long nowNs, final DriverConductor conductor)
@@ -456,10 +542,18 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
             }
             else if (UntetheredSubscription.State.LINGER == untethered.state)
             {
-                if ((untethered.timeOfLastUpdateNs + untetheredWindowLimitTimeoutNs) - nowNs <= 0)
+                if ((untethered.timeOfLastUpdateNs + untetheredLingerTimeoutNs) - nowNs <= 0)
                 {
                     subscriberPositions = ArrayUtil.remove(subscriberPositions, untethered.position);
-                    untethered.state(UntetheredSubscription.State.RESTING, nowNs, streamId, sessionId);
+                    if (untethered.subscriptionLink.isRejoin())
+                    {
+                        untethered.state(UntetheredSubscription.State.RESTING, nowNs, streamId, sessionId);
+                    }
+                    else
+                    {
+                        ArrayListUtil.fastUnorderedRemove(untetheredSubscriptions, i, lastIndex--);
+                        untethered.position.close();
+                    }
                 }
             }
             else if (UntetheredSubscription.State.RESTING == untethered.state)
@@ -477,9 +571,28 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
                         rawLog.fileName(),
                         CommonContext.IPC_CHANNEL);
                     untethered.state(UntetheredSubscription.State.ACTIVE, nowNs, streamId, sessionId);
-                    LogBufferDescriptor.isConnected(metaDataBuffer, true);
                 }
             }
+        }
+    }
+
+    private void updateConnectedStatus(final boolean newStatus)
+    {
+        if (LogBufferDescriptor.isConnected(metaDataBuffer) != newStatus)
+        {
+            LogBufferDescriptor.isConnected(metaDataBuffer, newStatus);
+        }
+    }
+
+    private void checkCoolDownStatus(final long timeNs, final DriverConductor conductor)
+    {
+        if (inCoolDown && coolDownExpireTimeNs < timeNs)
+        {
+            inCoolDown = false;
+
+            conductor.linkIpcSubscriptions(this);
+
+            coolDownExpireTimeNs = 0;
         }
     }
 
@@ -506,7 +619,7 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
             {
                 if (LogBufferUnblocker.unblock(termBuffers, metaDataBuffer, consumerPosition, termBufferLength))
                 {
-                    unblockedPublications.incrementOrdered();
+                    unblockedPublications.incrementRelease();
                 }
             }
         }
@@ -542,8 +655,16 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
             final int length = Math.min(bytesForCleaning, bufferCapacity - termOffset);
 
             dirtyTermBuffer.setMemory(termOffset + SIZE_OF_LONG, length - SIZE_OF_LONG, (byte)0);
-            dirtyTermBuffer.putLongOrdered(termOffset, 0);
+            dirtyTermBuffer.putLongRelease(termOffset, 0);
             this.cleanPosition = cleanPosition + length;
         }
+    }
+
+    private static void logRevoke(
+        final long revokedPos,
+        final int sessionId,
+        final int streamId,
+        final String channel)
+    {
     }
 }

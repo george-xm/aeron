@@ -449,6 +449,12 @@ int aeron_archive_context_set_control_term_buffer_sparse(aeron_archive_context_t
 bool aeron_archive_context_get_control_term_buffer_sparse(aeron_archive_context_t *ctx);
 
 /**
+ * Specify client name to identify this client on the archive side.
+ */
+int aeron_archive_context_set_client_name(aeron_archive_context_t *context, const char *value);
+const char *aeron_archive_context_get_client_name(aeron_archive_context_t *context);
+
+/**
  * Specify the idle strategy function and associated state used by the client between polling calls.
  */
 int aeron_archive_context_set_idle_strategy(

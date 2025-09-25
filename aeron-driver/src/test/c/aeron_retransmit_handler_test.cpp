@@ -73,7 +73,7 @@ public:
             resend_length,
             term_buffer_length,
             term_offset,
-            AERON_MAX_FLOW_CONTROL_RETRANSMIT_RECEIVER_WINDOW_MULTIPLE);
+            AERON_MULTICAST_FLOW_CONTROL_RETRANSMIT_RECEIVER_WINDOW_MULTIPLE);
     }
 
 protected:
@@ -218,7 +218,7 @@ TEST_F(RetransmitHandlerTest, errorOnRetransmitOverflow)
         16,
         &m_retransmit_overflow_counter), 0);
 
-    int64_t initial_overflow_value = aeron_counter_get(&m_retransmit_overflow_counter);
+    int64_t initial_overflow_value = aeron_counter_get_plain(&m_retransmit_overflow_counter);
 
     EXPECT_EQ(m_handler.active_retransmit_count, 0);
 
@@ -235,7 +235,7 @@ TEST_F(RetransmitHandlerTest, errorOnRetransmitOverflow)
     EXPECT_EQ(aeron_retransmit_handler_on_nak(
         &m_handler, TERM_ID, i, 1, TERM_LENGTH, MTU_LENGTH, &m_flow_control, m_time, RetransmitHandlerTest::on_resend, this), 0);
 
-    EXPECT_NE(initial_overflow_value, aeron_counter_get(&m_retransmit_overflow_counter));
+    EXPECT_NE(initial_overflow_value, aeron_counter_get_plain(&m_retransmit_overflow_counter));
 
     // these will all be duplicates of previous NAKs
     for (i = 0; i < AERON_RETRANSMIT_HANDLER_MAX_RESEND; i++)
@@ -245,4 +245,55 @@ TEST_F(RetransmitHandlerTest, errorOnRetransmitOverflow)
     }
 
     EXPECT_EQ(m_handler.active_retransmit_count, AERON_RETRANSMIT_HANDLER_MAX_RESEND);
+}
+
+TEST_F(RetransmitHandlerTest, shouldSkipInvalidNaks)
+{
+    ASSERT_EQ(aeron_retransmit_handler_init(
+        &m_handler,
+        &m_invalid_packet_counter,
+        DELAY_TIMEOUT_20MS,
+        LINGER_TIMEOUT_20MS,
+        true,
+        16,
+        &m_retransmit_overflow_counter), 0);
+
+    EXPECT_EQ(m_handler.active_retransmit_count, 0);
+
+    // invalid `term-offset`
+    EXPECT_EQ(aeron_retransmit_handler_on_nak(
+            &m_handler, TERM_ID, TERM_LENGTH - 5, 1, TERM_LENGTH, MTU_LENGTH, &m_flow_control, m_time, RetransmitHandlerTest::on_resend, this), 0);
+    EXPECT_EQ(1, aeron_counter_get_plain(&m_invalid_packet_counter));
+
+    // negative `term-offset`
+    EXPECT_EQ(aeron_retransmit_handler_on_nak(
+            &m_handler, TERM_ID, -1024, 1, TERM_LENGTH, MTU_LENGTH, &m_flow_control, m_time, RetransmitHandlerTest::on_resend, this), 0);
+    EXPECT_EQ(2, aeron_counter_get_plain(&m_invalid_packet_counter));
+
+    // negative `length`
+    EXPECT_EQ(aeron_retransmit_handler_on_nak(
+            &m_handler, TERM_ID, 0, -32, TERM_LENGTH, MTU_LENGTH, &m_flow_control, m_time, RetransmitHandlerTest::on_resend, this), 0);
+    EXPECT_EQ(3, aeron_counter_get_plain(&m_invalid_packet_counter));
+
+    EXPECT_EQ(m_handler.active_retransmit_count, 0);
+}
+
+TEST_F(RetransmitHandlerTest, shouldIgnoreEmptyNak)
+{
+    ASSERT_EQ(aeron_retransmit_handler_init(
+        &m_handler,
+        &m_invalid_packet_counter,
+        DELAY_TIMEOUT_20MS,
+        LINGER_TIMEOUT_20MS,
+        true,
+        16,
+        &m_retransmit_overflow_counter), 0);
+
+    EXPECT_EQ(m_handler.active_retransmit_count, 0);
+
+    // negative `length`
+    EXPECT_EQ(aeron_retransmit_handler_on_nak(
+            &m_handler, TERM_ID, 0, 0, TERM_LENGTH, MTU_LENGTH, &m_flow_control, m_time, RetransmitHandlerTest::on_resend, this), 0);
+    EXPECT_EQ(m_handler.active_retransmit_count, 0);
+    EXPECT_EQ(0, aeron_counter_get_plain(&m_invalid_packet_counter));
 }

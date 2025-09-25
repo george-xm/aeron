@@ -26,7 +26,7 @@ import org.agrona.LangUtil;
 import org.agrona.SystemUtil;
 import org.agrona.collections.Long2ObjectHashMap;
 import org.agrona.concurrent.IdleStrategy;
-import org.agrona.concurrent.SigInt;
+import org.agrona.concurrent.ShutdownSignalBarrier;
 import org.agrona.concurrent.SleepingMillisIdleStrategy;
 import org.agrona.concurrent.UnsafeBuffer;
 
@@ -148,10 +148,10 @@ public class FileReceiver
         System.out.println("Files stored to " + storageDir.getAbsolutePath());
 
         final IdleStrategy idleStrategy = new SleepingMillisIdleStrategy(1);
-        final AtomicBoolean running = new AtomicBoolean(true);
-        SigInt.register(() -> running.set(false));
 
-        try (MediaDriver mediaDriver = MediaDriver.launch();
+        final AtomicBoolean running = new AtomicBoolean(true);
+        try (ShutdownSignalBarrier barrier = new ShutdownSignalBarrier(() -> running.set(false));
+            MediaDriver mediaDriver = MediaDriver.launch(new MediaDriver.Context().terminationHook(barrier::signalAll));
             Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(mediaDriver.aeronDirectoryName()));
             Subscription subscription = aeron.addSubscription(CHANNEL, STREAM_ID))
         {

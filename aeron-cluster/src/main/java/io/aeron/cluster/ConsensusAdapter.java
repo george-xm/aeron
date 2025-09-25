@@ -265,7 +265,8 @@ class ConsensusAdapter implements FragmentHandler, AutoCloseable
                     backupQueryDecoder.responseStreamId(),
                     backupQueryDecoder.version(),
                     responseChannel,
-                    credentials);
+                    credentials,
+                    header);
                 break;
             }
 
@@ -305,6 +306,7 @@ class ConsensusAdapter implements FragmentHandler, AutoCloseable
                 }
                 else
                 {
+                    heartbeatRequestDecoder.skipEncodedCredentials();
                     credentials = ArrayUtil.EMPTY_BYTE_ARRAY;
                 }
 
@@ -312,7 +314,8 @@ class ConsensusAdapter implements FragmentHandler, AutoCloseable
                     heartbeatRequestDecoder.correlationId(),
                     heartbeatRequestDecoder.responseStreamId(),
                     responseChannel,
-                    credentials);
+                    credentials,
+                    header);
 
                 break;
             }
@@ -346,6 +349,7 @@ class ConsensusAdapter implements FragmentHandler, AutoCloseable
                 final byte[] encodedCredentials;
                 if (0 == standbySnapshotDecoder.encodedCredentialsLength())
                 {
+                    standbySnapshotDecoder.skipEncodedCredentials();
                     encodedCredentials = ArrayUtil.EMPTY_BYTE_ARRAY;
                 }
                 else
@@ -360,7 +364,8 @@ class ConsensusAdapter implements FragmentHandler, AutoCloseable
                     standbySnapshotEntries,
                     responseStreamId,
                     responseChannel,
-                    encodedCredentials);
+                    encodedCredentials,
+                    header);
             }
         }
     }

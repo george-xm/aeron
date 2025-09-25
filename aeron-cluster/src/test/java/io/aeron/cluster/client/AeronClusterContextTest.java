@@ -17,9 +17,12 @@ package io.aeron.cluster.client;
 
 import io.aeron.Aeron;
 import io.aeron.exceptions.ConfigurationException;
+import io.aeron.test.Tests;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrowsExactly;
@@ -27,14 +30,23 @@ import static org.mockito.Mockito.mock;
 
 class AeronClusterContextTest
 {
+    private final Aeron aeron = mock(Aeron.class);
+    private final AeronCluster.Context context = new AeronCluster.Context();
+
+    @BeforeEach
+    void before()
+    {
+        context
+            .aeron(aeron)
+            .ingressChannel("aeron:udp")
+            .egressChannel("aeron:udp?endpoint=localhost:0");
+    }
 
     @ParameterizedTest
     @NullAndEmptySource
     void concludeThrowsConfigurationExceptionIfIngressChannelIsNotSet(final String ingressChannel)
     {
-        final Aeron aeron = mock(Aeron.class);
-        final AeronCluster.Context context = new AeronCluster.Context();
-        context.aeron(aeron).ingressChannel(ingressChannel);
+        context.ingressChannel(ingressChannel);
 
         final ConfigurationException exception = assertThrowsExactly(ConfigurationException.class, context::conclude);
         assertEquals("ERROR - ingressChannel must be specified", exception.getMessage());
@@ -43,10 +55,7 @@ class AeronClusterContextTest
     @Test
     void concludeThrowsConfigurationExceptionIfIngressChannelIsSetToIpcAndIngressEndpointsSpecified()
     {
-        final Aeron aeron = mock(Aeron.class);
-        final AeronCluster.Context context = new AeronCluster.Context();
         context
-            .aeron(aeron)
             .ingressChannel("aeron:ipc")
             .ingressEndpoints("0,localhost:1234");
 
@@ -60,11 +69,52 @@ class AeronClusterContextTest
     @NullAndEmptySource
     void concludeThrowsConfigurationExceptionIfEgressChannelIsNotSet(final String egressChannel)
     {
-        final Aeron aeron = mock(Aeron.class);
-        final AeronCluster.Context context = new AeronCluster.Context();
-        context.aeron(aeron).ingressChannel("aeron:udp").egressChannel(egressChannel);
+        context.egressChannel(egressChannel);
 
         final ConfigurationException exception = assertThrowsExactly(ConfigurationException.class, context::conclude);
         assertEquals("ERROR - egressChannel must be specified", exception.getMessage());
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    void clientNameShouldHandleEmptyValue(final String clientName)
+    {
+        context.clientName(clientName);
+        assertEquals("", context.clientName());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "test", "Some other name" })
+    void clientNameShouldReturnAssignedValue(final String clientName)
+    {
+        context.clientName(clientName);
+        assertEquals(clientName, context.clientName());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "some", "42" })
+    void clientNameCanBeSetViaSystemProperty(final String clientName)
+    {
+        System.setProperty(AeronCluster.Configuration.CLIENT_NAME_PROP_NAME, clientName);
+        try
+        {
+            assertEquals(clientName, new AeronCluster.Context().clientName());
+        }
+        finally
+        {
+            System.clearProperty(AeronCluster.Configuration.CLIENT_NAME_PROP_NAME);
+        }
+    }
+
+    @Test
+    void clientNameMustNotExceedMaxLength()
+    {
+        context.clientName(Tests.generateStringWithSuffix("test", "x", Aeron.Configuration.MAX_CLIENT_NAME_LENGTH));
+
+        final ConfigurationException exception =
+            assertThrowsExactly(ConfigurationException.class, context::conclude);
+        assertEquals(
+            "ERROR - AeronCluster.Context.clientName length must be <= " + Aeron.Configuration.MAX_CLIENT_NAME_LENGTH,
+            exception.getMessage());
     }
 }

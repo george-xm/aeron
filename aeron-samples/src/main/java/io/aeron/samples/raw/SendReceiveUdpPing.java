@@ -20,7 +20,7 @@ import org.HdrHistogram.Histogram;
 import org.agrona.BitUtil;
 import org.agrona.SystemUtil;
 import org.agrona.concurrent.HighResolutionTimer;
-import org.agrona.concurrent.SigInt;
+import org.agrona.concurrent.ShutdownSignalBarrier;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -45,6 +45,7 @@ public class SendReceiveUdpPing
      * @param args passed to the process.
      * @throws IOException if an error occurs with the channel.
      */
+    @SuppressWarnings("try")
     public static void main(final String[] args) throws IOException
     {
         int numChannels = 1;
@@ -82,15 +83,16 @@ public class SendReceiveUdpPing
         init(sendChannel);
 
         final AtomicBoolean running = new AtomicBoolean(true);
-        SigInt.register(() -> running.set(false));
-
-        while (running.get())
+        try (ShutdownSignalBarrier ignore = new ShutdownSignalBarrier(() -> running.set(false)))
         {
-            measureRoundTrip(histogram, sendAddress, buffer, receiveChannels, sendChannel, running);
+            while (running.get())
+            {
+                measureRoundTrip(histogram, sendAddress, buffer, receiveChannels, sendChannel, running);
 
-            histogram.reset();
-            System.gc();
-            LockSupport.parkNanos(1_000_000_000L);
+                histogram.reset();
+                System.gc();
+                LockSupport.parkNanos(1_000_000_000L);
+            }
         }
     }
 

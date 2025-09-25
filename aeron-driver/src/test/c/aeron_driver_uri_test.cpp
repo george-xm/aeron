@@ -383,6 +383,32 @@ TEST_F(DriverUriTest, shouldFailWithInvalidMaxRetransmits)
     EXPECT_THAT(std::string(aeron_errmsg()), ::testing::HasSubstr("could not parse max-resend"));
 }
 
+TEST_F(DriverUriTest, shouldFailWithPublicationWindowLessThanMtu)
+{
+    aeron_driver_uri_publication_params_t params;
+
+    EXPECT_EQ(AERON_URI_PARSE("aeron:udp?endpoint=224.10.9.8|pub-wnd=2048|mtu=4096", &m_uri), 0);
+    EXPECT_EQ(aeron_diver_uri_publication_params(&m_uri, &params, &m_conductor, false), -1);
+    EXPECT_THAT(std::string(aeron_errmsg()), ::testing::HasSubstr("pub-wnd=2048 cannot be less than the mtu=4096"));
+}
+
+TEST_F(DriverUriTest, shouldFailWithPublicationWindowMoreThanHalfTermLength)
+{
+    aeron_driver_uri_publication_params_t params;
+
+    EXPECT_EQ(AERON_URI_PARSE("aeron:udp?endpoint=224.10.9.8|pub-wnd=262144|term-length=65536", &m_uri), 0);
+    EXPECT_EQ(aeron_diver_uri_publication_params(&m_uri, &params, &m_conductor, false), -1);
+    EXPECT_THAT(std::string(aeron_errmsg()), ::testing::HasSubstr("pub-wnd=262144 must not exceed half the term-length=65536"));
+}
+
+TEST_F(DriverUriTest, ipcResponseChannels)
+{
+    EXPECT_EQ(0, AERON_URI_PARSE("aeron:ipc?control-mode=response|alias=client1", &m_uri));
+    aeron_driver_uri_subscription_params_t params = {};
+    aeron_driver_uri_subscription_params(&m_uri, &params, &m_conductor);
+    EXPECT_TRUE(params.is_response);
+}
+
 class UriResolverTest : public testing::Test
 {
 public:

@@ -1234,3 +1234,95 @@ TEST_F(ClientConductorTest, shouldAddStaticCounterSuccessfully)
     ASSERT_EQ(aeron_counter_close(counter, nullptr, nullptr), 0);
     doWork();
 }
+
+TEST_F(ClientConductorTest, shouldReturnRandomSessionIdIfControlProtolVersionNotSatisfied)
+{
+    aeron_async_get_next_available_session_id_t *async = nullptr;
+
+    m_conductor.control_protocol_version = 1;
+
+    const int32_t streamId = 43;
+    ASSERT_EQ(aeron_client_conductor_async_get_next_available_session_id(&async, &m_conductor, streamId), 0);
+    ASSERT_EQ(streamId, async->stream_id);
+    ASSERT_EQ(AERON_CLIENT_REGISTERED_MEDIA_DRIVER, async->registration_status);
+    int32_t nextSessionId = async->resource.next_session_id;
+
+    int32_t sessionId;
+    ASSERT_EQ(aeron_async_next_session_id_poll(&sessionId, async), 1) << aeron_errmsg();
+    ASSERT_EQ(nextSessionId, sessionId);
+
+    ASSERT_EQ(aeron_client_conductor_async_get_next_available_session_id(&async, &m_conductor, streamId), 0);
+    ASSERT_EQ(streamId, async->stream_id);
+    ASSERT_EQ(AERON_CLIENT_REGISTERED_MEDIA_DRIVER, async->registration_status);
+    int32_t nextSessionId2 = async->resource.next_session_id;
+    ASSERT_EQ(aeron_async_next_session_id_poll(&sessionId, async), 1) << aeron_errmsg();
+
+    ASSERT_NE(nextSessionId, nextSessionId2);
+}
+
+class ClientConductorIsLengthSufficientTest : public testing::TestWithParam<std::tuple<aeron_mapped_file_t*, bool>>
+{
+};
+
+static aeron_mapped_file_t* mappedFileFrom(size_t length, const aeron_cnc_metadata_t *metadata)
+{
+    aeron_mapped_file_t *mappedFile;
+    if (aeron_alloc(reinterpret_cast<void **>(&mappedFile), sizeof(aeron_mapped_file_t)) < 0)
+    {
+        throw std::runtime_error("failed to allocate aeron_mapped_file_t");
+    }
+    mappedFile->addr = (void*)metadata;
+    mappedFile->length = length;
+    return mappedFile;
+}
+
+static aeron_cnc_metadata_t* metadata(
+    int32_t to_driver_buffer_length,
+    int32_t to_clients_buffer_length,
+    int32_t counter_metadata_buffer_length,
+    int32_t counter_values_buffer_length,
+    int32_t error_log_buffer_length)
+{
+    aeron_cnc_metadata_t *metadata;
+    if (aeron_alloc(reinterpret_cast<void **>(&metadata), sizeof(aeron_cnc_metadata_t)) < 0)
+    {
+        throw std::runtime_error("failed to allocate aeron_cnc_metadata_t");
+    }
+    metadata->to_driver_buffer_length = to_driver_buffer_length;
+    metadata->to_clients_buffer_length = to_clients_buffer_length;
+    metadata->counter_metadata_buffer_length = counter_metadata_buffer_length;
+    metadata->counter_values_buffer_length = counter_values_buffer_length;
+    metadata->error_log_buffer_length = error_log_buffer_length;
+    return metadata;
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ClientConductorIsLengthSufficientTest,
+    ClientConductorIsLengthSufficientTest,
+    testing::Values(
+        std::make_tuple(mappedFileFrom(0, nullptr), false),
+        std::make_tuple(mappedFileFrom(AERON_CNC_VERSION_AND_META_DATA_LENGTH - 1, nullptr), false),
+        std::make_tuple(mappedFileFrom(AERON_CNC_VERSION_AND_META_DATA_LENGTH,
+            metadata(TO_DRIVER_RING_BUFFER_LENGTH,0,0,0,0)), false),
+        std::make_tuple(mappedFileFrom(AERON_CNC_VERSION_AND_META_DATA_LENGTH + TO_DRIVER_RING_BUFFER_LENGTH,
+            metadata(TO_DRIVER_RING_BUFFER_LENGTH,TO_CLIENTS_BUFFER_LENGTH,0,0,0)), false),
+        std::make_tuple(mappedFileFrom(AERON_CNC_VERSION_AND_META_DATA_LENGTH + TO_DRIVER_RING_BUFFER_LENGTH + TO_CLIENTS_BUFFER_LENGTH,
+            metadata(TO_DRIVER_RING_BUFFER_LENGTH,TO_CLIENTS_BUFFER_LENGTH,COUNTER_METADATA_BUFFER_LENGTH,0,0)), false),
+        std::make_tuple(mappedFileFrom(AERON_CNC_VERSION_AND_META_DATA_LENGTH + TO_DRIVER_RING_BUFFER_LENGTH + TO_CLIENTS_BUFFER_LENGTH + COUNTER_METADATA_BUFFER_LENGTH,
+            metadata(TO_DRIVER_RING_BUFFER_LENGTH,TO_CLIENTS_BUFFER_LENGTH,COUNTER_METADATA_BUFFER_LENGTH,COUNTER_VALUES_BUFFER_LENGTH,0)), false),
+        std::make_tuple(mappedFileFrom(AERON_CNC_VERSION_AND_META_DATA_LENGTH + TO_DRIVER_RING_BUFFER_LENGTH + TO_CLIENTS_BUFFER_LENGTH + COUNTER_METADATA_BUFFER_LENGTH + COUNTER_VALUES_BUFFER_LENGTH,
+            metadata(TO_DRIVER_RING_BUFFER_LENGTH,TO_CLIENTS_BUFFER_LENGTH,COUNTER_METADATA_BUFFER_LENGTH,COUNTER_VALUES_BUFFER_LENGTH,ERROR_BUFFER_LENGTH)), false),
+        std::make_tuple(mappedFileFrom(AERON_CNC_VERSION_AND_META_DATA_LENGTH + TO_DRIVER_RING_BUFFER_LENGTH + TO_CLIENTS_BUFFER_LENGTH + COUNTER_METADATA_BUFFER_LENGTH + COUNTER_VALUES_BUFFER_LENGTH + ERROR_BUFFER_LENGTH,
+            metadata(TO_DRIVER_RING_BUFFER_LENGTH,TO_CLIENTS_BUFFER_LENGTH,COUNTER_METADATA_BUFFER_LENGTH,COUNTER_VALUES_BUFFER_LENGTH,ERROR_BUFFER_LENGTH)), true),
+        std::make_tuple(mappedFileFrom(INT64_MAX,
+            metadata(TO_DRIVER_RING_BUFFER_LENGTH,TO_CLIENTS_BUFFER_LENGTH,COUNTER_METADATA_BUFFER_LENGTH,COUNTER_VALUES_BUFFER_LENGTH,ERROR_BUFFER_LENGTH)), true)
+    ));
+
+TEST_P(ClientConductorIsLengthSufficientTest, shouldCheckIfLengthIsSufficient)
+{
+    const auto mappedFile = std::get<0>(GetParam());
+    const bool expected = std::get<1>(GetParam());
+    ASSERT_EQ(expected, aeron_cnc_is_file_length_sufficient(mappedFile));
+    aeron_free(mappedFile->addr);
+    aeron_free(mappedFile);
+}

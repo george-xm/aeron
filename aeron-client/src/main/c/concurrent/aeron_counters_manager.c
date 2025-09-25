@@ -344,7 +344,7 @@ void aeron_counters_reader_foreach_counter(
             AERON_GET_ACQUIRE(label_length, record->label_length);
 
             func(
-                aeron_counter_get_volatile(value_addr),
+                aeron_counter_get_acquire(value_addr),
                 id,
                 record->type_id,
                 (const uint8_t *)record->key,
@@ -549,16 +549,18 @@ extern int aeron_counters_reader_init(
 
 extern int64_t *aeron_counters_manager_addr(aeron_counters_manager_t *counters_manager, int32_t counter_id);
 
-extern void aeron_counter_set_ordered(volatile int64_t *addr, int64_t value);
+extern void aeron_counter_set_release(volatile int64_t *addr, int64_t value);
 
-extern int64_t aeron_counter_get(volatile int64_t *addr);
+extern int64_t aeron_counter_get_plain(volatile int64_t *addr);
+extern int64_t aeron_counter_get_acquire(volatile int64_t *addr);
 
-extern int64_t aeron_counter_get_volatile(volatile int64_t *addr);
+extern int64_t aeron_counter_increment(volatile int64_t *addr);
+extern int64_t aeron_counter_increment_release(volatile int64_t *addr);
+extern int64_t aeron_counter_increment_plain(volatile int64_t *addr);
 
-extern int64_t aeron_counter_increment(volatile int64_t *addr, int64_t value);
+extern int64_t aeron_counter_get_and_add(volatile int64_t *addr, int64_t value);
+extern int64_t aeron_counter_get_and_add_release(volatile int64_t *addr, int64_t value);
+extern int64_t aeron_counter_get_and_add_plain(volatile int64_t *addr, int64_t value);
 
-extern int64_t aeron_counter_ordered_increment(volatile int64_t *addr, int64_t value);
-
-extern int64_t aeron_counter_add_ordered(volatile int64_t *addr, int64_t value);
-
-extern bool aeron_counter_propose_max_ordered(volatile int64_t *addr, int64_t proposed_value);
+extern bool aeron_counter_propose_max_release(volatile int64_t *addr, int64_t proposed_value);
+extern bool aeron_counter_propose_max_plain(volatile int64_t *addr, int64_t proposed_value);

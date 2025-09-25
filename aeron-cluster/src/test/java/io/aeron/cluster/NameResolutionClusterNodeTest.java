@@ -15,6 +15,8 @@
  */
 package io.aeron.cluster;
 
+import io.aeron.CommonContext;
+import io.aeron.archive.Archive;
 import io.aeron.archive.ArchiveThreadingMode;
 import io.aeron.cluster.client.AeronCluster;
 import io.aeron.cluster.service.ClientSession;
@@ -37,64 +39,74 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.ArgumentCaptor;
+
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import static io.aeron.cluster.ClusterTestConstants.CLUSTER_MEMBERS;
 import static io.aeron.cluster.ClusterTestConstants.INGRESS_ENDPOINTS;
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
 
 @ExtendWith(InterruptingTestCallback.class)
 class NameResolutionClusterNodeTest
 {
-    private ClusteredMediaDriver clusteredMediaDriver;
+    private MediaDriver mediaDriver;
+    private Archive archive;
+    private ConsensusModule consensusModule;
     private ClusteredServiceContainer container;
     private AeronCluster aeronCluster;
 
-    private final ErrorHandler mockErrorHandler = mock(ErrorHandler.class);
+    private final CopyOnWriteArrayList<Throwable> errors = new CopyOnWriteArrayList<>();
 
     @BeforeEach
     void before()
     {
-        clusteredMediaDriver = ClusteredMediaDriver.launch(
-            new MediaDriver.Context()
-                .threadingMode(ThreadingMode.SHARED)
-                .termBufferSparseFile(true)
-                .errorHandler(mockErrorHandler)
-                .dirDeleteOnStart(true),
-            TestContexts.localhostArchive()
-                .catalogCapacity(ClusterTestConstants.CATALOG_CAPACITY)
-                .threadingMode(ArchiveThreadingMode.SHARED)
-                .recordingEventsEnabled(false)
-                .deleteArchiveOnStart(true),
-            new ConsensusModule.Context()
-                .errorHandler(ClusterTests.errorHandler(0))
-                .terminationHook(ClusterTests.NOOP_TERMINATION_HOOK)
-                .logChannel("aeron:ipc")
-                .replicationChannel("aeron:udp?endpoint=localhost:0")
-                .ingressChannel("aeron:udp")
-                .clusterMembers(CLUSTER_MEMBERS)
-                .deleteDirOnStart(true));
+        mediaDriver = MediaDriver.launch(new MediaDriver.Context()
+            .aeronDirectoryName(CommonContext.generateRandomDirName())
+            .threadingMode(ThreadingMode.SHARED)
+            .termBufferSparseFile(true)
+            .errorHandler(errors::add)
+            .dirDeleteOnStart(true));
+
+        archive = Archive.launch(TestContexts.localhostArchive()
+            .aeronDirectoryName(mediaDriver.aeronDirectoryName())
+            .catalogCapacity(ClusterTestConstants.CATALOG_CAPACITY)
+            .threadingMode(ArchiveThreadingMode.SHARED)
+            .recordingEventsEnabled(false)
+            .deleteArchiveOnStart(true));
+
+        consensusModule = ConsensusModule.launch(new ConsensusModule.Context()
+            .aeronDirectoryName(mediaDriver.aeronDirectoryName())
+            .errorHandler(ClusterTests.errorHandler(0))
+            .terminationHook(ClusterTests.NOOP_TERMINATION_HOOK)
+            .logChannel("aeron:ipc")
+            .replicationChannel("aeron:udp?endpoint=localhost:0")
+            .ingressChannel("aeron:udp")
+            .clusterMembers(CLUSTER_MEMBERS)
+            .deleteDirOnStart(true));
     }
 
     @AfterEach
     void after()
     {
-        final ConsensusModule consensusModule = null == clusteredMediaDriver ?
-            null : clusteredMediaDriver.consensusModule();
+        CloseHelper.closeAll(aeronCluster, consensusModule, container, archive, mediaDriver);
 
-        CloseHelper.closeAll(aeronCluster, consensusModule, container, clusteredMediaDriver);
-
-        if (null != clusteredMediaDriver)
+        if (null != container)
         {
-            clusteredMediaDriver.consensusModule().context().deleteDirectory();
-            clusteredMediaDriver.archive().context().deleteDirectory();
-            clusteredMediaDriver.mediaDriver().context().deleteDirectory();
             container.context().deleteDirectory();
+        }
+
+        if (null != consensusModule)
+        {
+            consensusModule.context().deleteDirectory();
+        }
+
+        if (null != archive)
+        {
+            archive.context().deleteDirectory();
         }
     }
 
@@ -107,11 +119,11 @@ class NameResolutionClusterNodeTest
 
         assertTrue(aeronCluster.sendKeepAlive());
 
-        final ArgumentCaptor<Throwable> argumentCaptor = ArgumentCaptor.forClass(Throwable.class);
-        verify(mockErrorHandler).onError(argumentCaptor.capture());
+        assertEquals(1, errors.size(), errors::toString);
+        final Throwable exception = errors.get(0);
 
-        assertEquals(InvalidChannelException.class, argumentCaptor.getValue().getClass());
-        assertThat(argumentCaptor.getValue().getMessage(), containsString("badname"));
+        assertInstanceOf(InvalidChannelException.class, exception);
+        assertThat(exception.getMessage(), containsString("badname"));
 
         ClusterTests.failOnClusterError();
     }
@@ -134,6 +146,7 @@ class NameResolutionClusterNodeTest
 
         return ClusteredServiceContainer.launch(
             new ClusteredServiceContainer.Context()
+                .aeronDirectoryName(mediaDriver.aeronDirectoryName())
                 .clusteredService(clusteredService)
                 .errorHandler(Tests::onError));
     }
@@ -149,6 +162,7 @@ class NameResolutionClusterNodeTest
 
         return AeronCluster.connect(
             new AeronCluster.Context()
+                .aeronDirectoryName(mediaDriver.aeronDirectoryName())
                 .errorHandler(errorHandler)
                 .ingressChannel("aeron:udp")
                 .ingressEndpoints(INGRESS_ENDPOINTS + ",1=badname:9011")

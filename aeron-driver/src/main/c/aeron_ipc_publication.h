@@ -51,6 +51,7 @@ typedef struct aeron_ipc_publication_stct
         int64_t consumer_position;
         int64_t last_consumer_position;
         int64_t time_of_last_consumer_position_change_ns;
+        int64_t response_correlation_id;
     }
     conductor_fields;
 
@@ -59,9 +60,13 @@ typedef struct aeron_ipc_publication_stct
     int64_t trip_gain;
     int64_t unblock_timeout_ns;
     int64_t untethered_window_limit_timeout_ns;
+    int64_t untethered_linger_timeout_ns;
     int64_t untethered_resting_timeout_ns;
+    int64_t liveness_timeout_ns;
     int32_t initial_term_id;
     bool is_exclusive;
+    bool in_cool_down;
+    int64_t cool_down_expire_time_ns;
     int64_t tag;
     int32_t session_id;
     int32_t stream_id;
@@ -77,9 +82,11 @@ typedef struct aeron_ipc_publication_stct
     struct
     {
         aeron_untethered_subscription_state_change_func_t untethered_subscription_state_change;
+        aeron_driver_publication_revoke_func_t publication_revoke;
     } log;
 
     volatile int64_t *unblocked_publications_counter;
+    volatile int64_t *publications_revoked_counter;
     volatile int64_t *mapped_bytes_counter;
 }
 aeron_ipc_publication_t;
@@ -110,9 +117,13 @@ void aeron_ipc_publication_clean_buffer(aeron_ipc_publication_t *publication, in
 void aeron_ipc_publication_on_time_event(
     aeron_driver_conductor_t *conductor, aeron_ipc_publication_t *publication, int64_t now_ns, int64_t now_ms);
 
-void aeron_ipc_publication_incref(void *clientd);
-
-void aeron_ipc_publication_decref(void *clientd);
+void aeron_ipc_publication_reject(
+    aeron_ipc_publication_t *publication,
+    int64_t position,
+    int32_t reason_length,
+    const char *reason,
+    aeron_driver_conductor_t *conductor,
+    int64_t now_ns);
 
 void aeron_ipc_publication_check_for_blocked_publisher(
     aeron_ipc_publication_t *publication, int64_t producer_position, int64_t now_ns);
@@ -127,9 +138,7 @@ inline void aeron_ipc_publication_remove_subscriber_hook(void *clientd, volatile
 {
     aeron_ipc_publication_t *publication = (aeron_ipc_publication_t *)clientd;
 
-    aeron_ipc_publication_update_pub_pos_and_lmt(publication);
-
-    if (1 == publication->conductor_fields.subscribable.length && NULL != publication->mapped_raw_log.mapped_file.addr)
+    if (1 == aeron_driver_subscribable_working_position_count(&publication->conductor_fields.subscribable))
     {
         AERON_SET_RELEASE(publication->log_meta_data->is_connected, 0);
     }
@@ -174,7 +183,7 @@ inline int64_t aeron_ipc_publication_join_position(aeron_ipc_publication_t *publ
 
         if (AERON_SUBSCRIPTION_TETHER_RESTING != tetherable_position->state)
         {
-            const int64_t sub_pos = aeron_counter_get_volatile(tetherable_position->value_addr);
+            const int64_t sub_pos = aeron_counter_get_acquire(tetherable_position->value_addr);
 
             if (sub_pos < position)
             {
@@ -201,7 +210,7 @@ inline bool aeron_ipc_publication_is_drained(aeron_ipc_publication_t *publicatio
 
         if (AERON_SUBSCRIPTION_TETHER_RESTING != tetherable_position->state)
         {
-            const int64_t sub_pos = aeron_counter_get_volatile(tetherable_position->value_addr);
+            const int64_t sub_pos = aeron_counter_get_acquire(tetherable_position->value_addr);
 
             if (sub_pos < producer_position)
             {
@@ -215,9 +224,10 @@ inline bool aeron_ipc_publication_is_drained(aeron_ipc_publication_t *publicatio
 
 inline bool aeron_ipc_publication_is_accepting_subscriptions(aeron_ipc_publication_t *publication)
 {
-    return AERON_IPC_PUBLICATION_STATE_ACTIVE == publication->conductor_fields.state ||
+    return !publication->in_cool_down &&
+        (AERON_IPC_PUBLICATION_STATE_ACTIVE == publication->conductor_fields.state ||
         (AERON_IPC_PUBLICATION_STATE_DRAINING == publication->conductor_fields.state &&
-            !aeron_ipc_publication_is_drained(publication));
+            !aeron_ipc_publication_is_drained(publication)));
 }
 
 #endif //AERON_IPC_PUBLICATION_H

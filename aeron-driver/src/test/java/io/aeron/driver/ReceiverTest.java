@@ -55,14 +55,24 @@ import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.DatagramChannel;
 import java.util.ArrayList;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
-import static io.aeron.logbuffer.LogBufferDescriptor.*;
+import static io.aeron.logbuffer.LogBufferDescriptor.TERM_MIN_LENGTH;
+import static io.aeron.logbuffer.LogBufferDescriptor.computePosition;
+import static io.aeron.logbuffer.LogBufferDescriptor.indexByTerm;
 import static org.agrona.BitUtil.align;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.core.Is.is;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyBoolean;
+import static org.mockito.Mockito.anyLong;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @ExtendWith(InterruptingTestCallback.class)
 class ReceiverTest
@@ -71,6 +81,7 @@ class ReceiverTest
     private static final int POSITION_BITS_TO_SHIFT = LogBufferDescriptor.positionBitsToShift(TERM_BUFFER_LENGTH);
     private static final String URI = "aeron:udp?endpoint=localhost:4005";
     private static final UdpChannel UDP_CHANNEL = UdpChannel.parse(URI);
+    private static final long UNTETHERED_TIMEOUT_NS = TimeUnit.SECONDS.toNanos(1);
     private static final long CORRELATION_ID = 20;
     private static final int STREAM_ID = 1010;
     private static final int INITIAL_TERM_ID = 3;
@@ -95,6 +106,7 @@ class ReceiverTest
     private final Position mockHighestReceivedPosition = spy(new AtomicLongPosition());
     private final Position mockRebuildPosition = spy(new AtomicLongPosition());
     private final Position mockSubscriberPosition = mock(Position.class);
+    private final AtomicCounter rcvNaksSent = mock(AtomicCounter.class);
     private final UnsafeBuffer dataBuffer = new UnsafeBuffer(new byte[2 * 1024]);
     private final UnsafeBuffer setupBuffer = new UnsafeBuffer(new byte[SetupFlyweight.HEADER_LENGTH]);
 
@@ -118,6 +130,8 @@ class ReceiverTest
     private Receiver receiver;
     private ReceiverProxy receiverProxy;
     private final ManyToOneConcurrentLinkedQueue<Runnable> toConductorQueue = new ManyToOneConcurrentLinkedQueue<>();
+    private final DriverConductorProxy driverConductorProxy =
+        new DriverConductorProxy(ThreadingMode.DEDICATED, toConductorQueue, mock(AtomicCounter.class));
     private final CongestionControl congestionControl = mock(CongestionControl.class);
     private final MediaDriver.Context ctx = new MediaDriver.Context()
         .systemCounters(mockSystemCounters)
@@ -147,9 +161,6 @@ class ReceiverTest
             anyLong(), anyLong(), anyLong(), anyLong(), anyLong(), anyLong(), anyBoolean()))
             .thenReturn(CongestionControl.packOutcome(INITIAL_WINDOW_LENGTH, false));
         when(congestionControl.initialWindowLength()).thenReturn(INITIAL_WINDOW_LENGTH);
-
-        final DriverConductorProxy driverConductorProxy =
-            new DriverConductorProxy(ThreadingMode.DEDICATED, toConductorQueue, mock(AtomicCounter.class));
 
         final MediaDriver.Context ctx = new MediaDriver.Context()
             .driverCommandQueue(toConductorQueue)
@@ -204,6 +215,7 @@ class ReceiverTest
     @InterruptAfter(10)
     void shouldCreateRcvTermAndSendSmOnSetup() throws IOException
     {
+        receiveChannelEndpoint.openChannel(driverConductorProxy);
         receiverProxy.registerReceiveChannelEndpoint(receiveChannelEndpoint);
         receiverProxy.addSubscription(receiveChannelEndpoint, STREAM_ID);
 
@@ -227,10 +239,14 @@ class ReceiverTest
             INITIAL_TERM_OFFSET,
             (short)0,
             rawLog,
+            UNTETHERED_TIMEOUT_NS,
+            UNTETHERED_TIMEOUT_NS,
+            UNTETHERED_TIMEOUT_NS,
             mockFeedbackDelayGenerator,
             POSITIONS,
             mockHighestReceivedPosition,
             mockRebuildPosition,
+            rcvNaksSent,
             SOURCE_IDENTITY,
             congestionControl);
 
@@ -269,6 +285,7 @@ class ReceiverTest
     @Test
     void shouldInsertDataIntoLogAfterInitialExchange()
     {
+        receiveChannelEndpoint.openChannel(driverConductorProxy);
         receiverProxy.registerReceiveChannelEndpoint(receiveChannelEndpoint);
         receiverProxy.addSubscription(receiveChannelEndpoint, STREAM_ID);
 
@@ -294,10 +311,14 @@ class ReceiverTest
                     INITIAL_TERM_OFFSET,
                     (short)0,
                     rawLog,
+                    UNTETHERED_TIMEOUT_NS,
+                    UNTETHERED_TIMEOUT_NS,
+                    UNTETHERED_TIMEOUT_NS,
                     mockFeedbackDelayGenerator,
                     POSITIONS,
                     mockHighestReceivedPosition,
                     mockRebuildPosition,
+                    rcvNaksSent,
                     SOURCE_IDENTITY,
                     congestionControl);
 
@@ -335,6 +356,7 @@ class ReceiverTest
     @Test
     void shouldNotOverwriteDataFrameWithHeartbeat()
     {
+        receiveChannelEndpoint.openChannel(driverConductorProxy);
         receiverProxy.registerReceiveChannelEndpoint(receiveChannelEndpoint);
         receiverProxy.addSubscription(receiveChannelEndpoint, STREAM_ID);
 
@@ -360,10 +382,14 @@ class ReceiverTest
                     INITIAL_TERM_OFFSET,
                     (short)0,
                     rawLog,
+                    UNTETHERED_TIMEOUT_NS,
+                    UNTETHERED_TIMEOUT_NS,
+                    UNTETHERED_TIMEOUT_NS,
                     mockFeedbackDelayGenerator,
                     POSITIONS,
                     mockHighestReceivedPosition,
                     mockRebuildPosition,
+                    rcvNaksSent,
                     SOURCE_IDENTITY,
                     congestionControl);
 
@@ -404,6 +430,7 @@ class ReceiverTest
     @Test
     void shouldOverwriteHeartbeatWithDataFrame()
     {
+        receiveChannelEndpoint.openChannel(driverConductorProxy);
         receiverProxy.registerReceiveChannelEndpoint(receiveChannelEndpoint);
         receiver.doWork();
         receiverProxy.addSubscription(receiveChannelEndpoint, STREAM_ID);
@@ -428,10 +455,14 @@ class ReceiverTest
                     INITIAL_TERM_OFFSET,
                     (short)0,
                     rawLog,
+                    UNTETHERED_TIMEOUT_NS,
+                    UNTETHERED_TIMEOUT_NS,
+                    UNTETHERED_TIMEOUT_NS,
                     mockFeedbackDelayGenerator,
                     POSITIONS,
                     mockHighestReceivedPosition,
                     mockRebuildPosition,
+                    rcvNaksSent,
                     SOURCE_IDENTITY,
                     congestionControl);
 
@@ -476,6 +507,7 @@ class ReceiverTest
         final int alignedDataFrameLength =
             align(DataHeaderFlyweight.HEADER_LENGTH + FAKE_PAYLOAD.length, FrameDescriptor.FRAME_ALIGNMENT);
 
+        receiveChannelEndpoint.openChannel(driverConductorProxy);
         receiverProxy.registerReceiveChannelEndpoint(receiveChannelEndpoint);
         receiverProxy.addSubscription(receiveChannelEndpoint, STREAM_ID);
 
@@ -501,10 +533,14 @@ class ReceiverTest
                     initialTermOffset,
                     (short)0,
                     rawLog,
+                    UNTETHERED_TIMEOUT_NS,
+                    UNTETHERED_TIMEOUT_NS,
+                    UNTETHERED_TIMEOUT_NS,
                     mockFeedbackDelayGenerator,
                     POSITIONS,
                     mockHighestReceivedPosition,
                     mockRebuildPosition,
+                    rcvNaksSent,
                     SOURCE_IDENTITY,
                     congestionControl);
 
@@ -513,14 +549,14 @@ class ReceiverTest
 
         assertThat(commandsRead, is(1));
 
-        verify(mockHighestReceivedPosition).setOrdered(initialTermOffset);
+        verify(mockHighestReceivedPosition).setRelease(initialTermOffset);
 
         receiver.doWork();
 
         fillDataFrame(dataHeader, initialTermOffset);  // initial data frame
         receiveChannelEndpoint.onDataPacket(dataHeader, dataBuffer, alignedDataFrameLength, senderAddress, 0);
 
-        verify(mockHighestReceivedPosition).setOrdered(initialTermOffset + alignedDataFrameLength);
+        verify(mockHighestReceivedPosition).proposeMaxRelease(initialTermOffset + alignedDataFrameLength);
 
         final int readOutcome = TermReader.read(
             termBuffers[ACTIVE_INDEX],
@@ -546,6 +582,7 @@ class ReceiverTest
     @Test
     void shouldRemoveImageFromDispatcherWithNoActivity()
     {
+        receiveChannelEndpoint.openChannel(driverConductorProxy);
         receiverProxy.registerReceiveChannelEndpoint(receiveChannelEndpoint);
         receiverProxy.addSubscription(receiveChannelEndpoint, STREAM_ID);
 
@@ -569,6 +606,7 @@ class ReceiverTest
     @Test
     void shouldNotRemoveImageFromDispatcherOnRemoveSubscription()
     {
+        receiveChannelEndpoint.openChannel(driverConductorProxy);
         receiverProxy.registerReceiveChannelEndpoint(receiveChannelEndpoint);
         receiverProxy.addSubscription(receiveChannelEndpoint, STREAM_ID);
 

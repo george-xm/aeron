@@ -268,7 +268,7 @@ void aeron_cubic_congestion_control_strategy_on_rttm(
 
     cubic_state->last_rtt_timestamp_ns = now_ns;
     cubic_state->rtt_ns = rtt_ns;
-    aeron_counter_set_ordered(cubic_state->rtt_indicator.value_addr, rtt_ns);
+    aeron_counter_set_release(cubic_state->rtt_indicator.value_addr, rtt_ns);
     cubic_state->rtt_timeout_ns =
         (rtt_ns > (int64_t)cubic_state->initial_rtt_ns ? rtt_ns : (int64_t)cubic_state->initial_rtt_ns) *
         AERON_CUBICCONGESTIONCONTROL_RTT_TIMEOUT_MULTIPLE;
@@ -334,7 +334,7 @@ int32_t aeron_cubic_congestion_control_strategy_on_track_rebuild(
     }
 
     const int32_t window = cubic_state->cwnd * cubic_state->mtu;
-    aeron_counter_set_ordered(cubic_state->window_indicator.value_addr, window);
+    aeron_counter_set_release(cubic_state->window_indicator.value_addr, window);
 
     return window;
 }
@@ -464,11 +464,11 @@ int aeron_cubic_congestion_control_strategy_supplier(
 
     state->rtt_indicator.counter_id = rtt_indicator_counter_id;
     state->rtt_indicator.value_addr = aeron_counters_manager_addr(counters_manager, rtt_indicator_counter_id);
-    aeron_counter_set_ordered(state->rtt_indicator.value_addr, 0);
+    aeron_counter_set_release(state->rtt_indicator.value_addr, 0);
 
     state->window_indicator.counter_id = window_indicator_counter_id;
     state->window_indicator.value_addr = aeron_counters_manager_addr(counters_manager, window_indicator_counter_id);
-    aeron_counter_set_ordered(state->window_indicator.value_addr, state->initial_window_length);
+    aeron_counter_set_release(state->window_indicator.value_addr, state->initial_window_length);
 
     state->last_rtt_timestamp_ns = 0;
 

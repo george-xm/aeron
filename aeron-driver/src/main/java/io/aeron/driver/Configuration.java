@@ -32,7 +32,15 @@ import org.agrona.BitUtil;
 import org.agrona.LangUtil;
 import org.agrona.Strings;
 import org.agrona.collections.ArrayUtil;
-import org.agrona.concurrent.*;
+import org.agrona.concurrent.BackoffIdleStrategy;
+import org.agrona.concurrent.BusySpinIdleStrategy;
+import org.agrona.concurrent.ControllableIdleStrategy;
+import org.agrona.concurrent.IdleStrategy;
+import org.agrona.concurrent.NoOpIdleStrategy;
+import org.agrona.concurrent.SleepingIdleStrategy;
+import org.agrona.concurrent.SleepingMillisIdleStrategy;
+import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.concurrent.YieldingIdleStrategy;
 import org.agrona.concurrent.broadcast.BroadcastBufferDescriptor;
 import org.agrona.concurrent.ringbuffer.RingBufferDescriptor;
 import org.agrona.concurrent.status.CountersReader;
@@ -51,7 +59,9 @@ import static java.lang.Long.getLong;
 import static java.lang.System.getProperty;
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
 import static org.agrona.BitUtil.fromHex;
-import static org.agrona.SystemUtil.*;
+import static org.agrona.SystemUtil.getDurationInNanos;
+import static org.agrona.SystemUtil.getSizeAsInt;
+import static org.agrona.SystemUtil.getSizeAsLong;
 
 /**
  * Configuration options for the {@link MediaDriver}.
@@ -86,13 +96,14 @@ public final class Configuration
     /**
      * Property name for default boolean value for if subscriptions should have a tether for local flow control.
      */
-    @Config(defaultType = DefaultType.BOOLEAN, defaultBoolean = true)
+    @Config(uriParam = CommonContext.TETHER_PARAM_NAME, defaultType = DefaultType.BOOLEAN, defaultBoolean = true)
     public static final String TETHER_SUBSCRIPTIONS_PROP_NAME = "aeron.tether.subscriptions";
 
     /**
      * Property name for default boolean value for if a stream is reliable. True to NAK, false to gap fill.
      */
-    @Config(defaultType = DefaultType.BOOLEAN, defaultBoolean = true)
+    @Config(
+        uriParam = CommonContext.RELIABLE_STREAM_PARAM_NAME, defaultType = DefaultType.BOOLEAN, defaultBoolean = true)
     public static final String RELIABLE_STREAM_PROP_NAME = "aeron.reliable.stream";
 
     /**
@@ -127,25 +138,25 @@ public final class Configuration
     /**
      * Length (in bytes) of the log buffers for UDP publication terms.
      */
-    @Config(uriParam = "term-length")
+    @Config(uriParam = CommonContext.TERM_LENGTH_PARAM_NAME)
     public static final String TERM_BUFFER_LENGTH_PROP_NAME = "aeron.term.buffer.length";
 
     /**
      * Default term buffer length.
      */
-    @Config
+    @Config(configType = Config.Type.DEFAULT)
     public static final int TERM_BUFFER_LENGTH_DEFAULT = 16 * 1024 * 1024;
 
     /**
      * Length (in bytes) of the log buffers for IPC publication terms.
      */
-    @Config(uriParam = "term-length")
+    @Config(uriParam = CommonContext.TERM_LENGTH_PARAM_NAME)
     public static final String IPC_TERM_BUFFER_LENGTH_PROP_NAME = "aeron.ipc.term.buffer.length";
 
     /**
      * Default IPC term buffer length.
      */
-    @Config(id = "IPC_TERM_BUFFER_LENGTH")
+    @Config(id = "IPC_TERM_BUFFER_LENGTH", configType = Config.Type.DEFAULT)
     public static final int TERM_BUFFER_IPC_LENGTH_DEFAULT = 64 * 1024 * 1024;
 
     /**
@@ -204,10 +215,15 @@ public final class Configuration
      * Default length of the buffer for the counters file.
      */
     @Config(expectedCDefaultFieldName = "AERON_COUNTERS_VALUES_BUFFER_LENGTH_DEFAULT")
-    public static final int COUNTERS_VALUES_BUFFER_LENGTH_DEFAULT = 1024 * 1024;
+    public static final int COUNTERS_VALUES_BUFFER_LENGTH_DEFAULT = 8 * 1024 * 1024;
 
     /**
-     * Maximum length of the buffer for the counters file.
+     * Minimum counters buffer length.
+     */
+    public static final int COUNTERS_VALUES_BUFFER_LENGTH_MIN = 1024 * 1024;
+
+    /**
+     * Maximum counters buffer length.
      */
     public static final int COUNTERS_VALUES_BUFFER_LENGTH_MAX = 500 * 1024 * 1024;
 
@@ -221,7 +237,7 @@ public final class Configuration
      * Default buffer length for the error buffer for the media driver.
      */
     @Config
-    public static final int ERROR_BUFFER_LENGTH_DEFAULT = 1024 * 1024;
+    public static final int ERROR_BUFFER_LENGTH_DEFAULT = 4 * 1024 * 1024;
 
     /**
      * Property name for length of the memory mapped buffer for the {@link io.aeron.driver.reports.LossReport}.
@@ -238,7 +254,7 @@ public final class Configuration
     /**
      * Property name for length of the initial window which must be sufficient for Bandwidth Delay Product (BDP).
      */
-    @Config
+    @Config(uriParam = CommonContext.RECEIVER_WINDOW_LENGTH_PARAM_NAME)
     public static final String INITIAL_WINDOW_LENGTH_PROP_NAME = "aeron.rcv.initial.window.length";
 
     /**
@@ -253,7 +269,7 @@ public final class Configuration
      * Buffer = (10 * 1000 * 1000 * 1000 / 8) * 0.0001 = 125000
      * Round to 128 KB
      */
-    @Config
+    @Config(configType = Config.Type.DEFAULT)
     public static final int INITIAL_WINDOW_LENGTH_DEFAULT = 128 * 1024;
 
     /**
@@ -298,50 +314,53 @@ public final class Configuration
     /**
      * Property name for SO_RCVBUF setting on UDP sockets which must be sufficient for Bandwidth Delay Product (BDP).
      */
-    @Config
+    @Config(uriParam = CommonContext.SOCKET_RCVBUF_PARAM_NAME)
     public static final String SOCKET_RCVBUF_LENGTH_PROP_NAME = "aeron.socket.so_rcvbuf";
 
     /**
      * Default SO_RCVBUF length.
      */
-    @Config
+    @Config(configType = Config.Type.DEFAULT)
     public static final int SOCKET_RCVBUF_LENGTH_DEFAULT = 128 * 1024;
 
     /**
      * Property name for SO_SNDBUF setting on UDP sockets which must be sufficient for Bandwidth Delay Product (BDP).
      */
-    @Config
+    @Config(uriParam = CommonContext.SOCKET_SNDBUF_PARAM_NAME)
     public static final String SOCKET_SNDBUF_LENGTH_PROP_NAME = "aeron.socket.so_sndbuf";
 
     /**
      * Default SO_SNDBUF length.
      */
-    @Config
+    @Config(configType = Config.Type.DEFAULT)
     public static final int SOCKET_SNDBUF_LENGTH_DEFAULT = 0;
 
     /**
      * Property name for IP_MULTICAST_TTL setting on UDP sockets.
      */
-    @Config
+    @Config(uriParam = CommonContext.TTL_PARAM_NAME)
     public static final String SOCKET_MULTICAST_TTL_PROP_NAME = "aeron.socket.multicast.ttl";
 
     /**
      * Multicast TTL value, 0 means use OS default.
      */
-    @Config
+    @Config(configType = Config.Type.DEFAULT)
     public static final int SOCKET_MULTICAST_TTL_DEFAULT = 0;
 
     /**
      * Property name for linger timeout after draining on {@link Publication}s so they can respond to NAKs.
      */
-    @Config
+    @Config(uriParam = CommonContext.LINGER_PARAM_NAME)
     public static final String PUBLICATION_LINGER_PROP_NAME = "aeron.publication.linger.timeout";
 
     /**
      * Default time for {@link Publication}s to linger after draining and before cleanup in nanoseconds.
      */
     @Config(
+        configType = Config.Type.DEFAULT,
         expectedCDefaultFieldName = "AERON_PUBLICATION_LINGER_TIMEOUT_NS_DEFAULT",
+        isTimeValue = Config.IsTimeValue.TRUE,
+        timeUnit = TimeUnit.NANOSECONDS,
         defaultType = DefaultType.LONG,
         defaultLong = 5L * 1000 * 1000 * 1000)
     public static final long PUBLICATION_LINGER_DEFAULT_NS = TimeUnit.SECONDS.toNanos(5);
@@ -356,7 +375,10 @@ public final class Configuration
      * Default timeout for client liveness timeout after which it is considered not alive.
      */
     @Config(
+        configType = Config.Type.DEFAULT,
         expectedCDefaultFieldName = "AERON_CLIENT_LIVENESS_TIMEOUT_NS_DEFAULT",
+        isTimeValue = Config.IsTimeValue.TRUE,
+        timeUnit = TimeUnit.NANOSECONDS,
         defaultType = DefaultType.LONG,
         defaultLong = 10L * 1000 * 1000 * 1000)
     public static final long CLIENT_LIVENESS_TIMEOUT_DEFAULT_NS = TimeUnit.SECONDS.toNanos(10);
@@ -372,7 +394,10 @@ public final class Configuration
      * Default timeout for {@link Image} liveness timeout.
      */
     @Config(
+        configType = Config.Type.DEFAULT,
         expectedCDefaultFieldName = "AERON_IMAGE_LIVENESS_TIMEOUT_NS_DEFAULT",
+        isTimeValue = Config.IsTimeValue.TRUE,
+        timeUnit = TimeUnit.NANOSECONDS,
         defaultType = DefaultType.LONG,
         defaultLong = 10L * 1000 * 1000 * 1000)
     public static final long IMAGE_LIVENESS_TIMEOUT_DEFAULT_NS = TimeUnit.SECONDS.toNanos(10);
@@ -380,13 +405,19 @@ public final class Configuration
     /**
      * Property name for window limit on {@link Publication} side by which the publisher can get ahead of consumers.
      */
-    @Config(defaultType = DefaultType.INT, defaultInt = 0)
+    @Config(
+        uriParam = CommonContext.PUBLICATION_WINDOW_LENGTH_PARAM_NAME,
+        defaultType = DefaultType.INT,
+        defaultInt = 0)
     public static final String PUBLICATION_TERM_WINDOW_LENGTH_PROP_NAME = "aeron.publication.term.window.length";
 
     /**
      * Property name for window limit for IPC publications.
      */
-    @Config(defaultType = DefaultType.INT, defaultInt = 0)
+    @Config(
+        uriParam = CommonContext.PUBLICATION_WINDOW_LENGTH_PARAM_NAME,
+        defaultType = DefaultType.INT,
+        defaultInt = 0)
     public static final String IPC_PUBLICATION_TERM_WINDOW_LENGTH_PROP_NAME =
         "aeron.ipc.publication.term.window.length";
 
@@ -404,7 +435,10 @@ public final class Configuration
      * Timeout for {@link Publication} unblock in nanoseconds.
      */
     @Config(
+        configType = Config.Type.DEFAULT,
         expectedCDefaultFieldName = "AERON_PUBLICATION_UNBLOCK_TIMEOUT_NS_DEFAULT",
+        isTimeValue = Config.IsTimeValue.TRUE,
+        timeUnit = TimeUnit.NANOSECONDS,
         defaultType = DefaultType.LONG,
         defaultLong = 15L * 1000 * 1000 * 1000)
     public static final long PUBLICATION_UNBLOCK_TIMEOUT_DEFAULT_NS = TimeUnit.SECONDS.toNanos(15);
@@ -419,7 +453,10 @@ public final class Configuration
      * Timeout for {@link Publication} connection timeout in nanoseconds.
      */
     @Config(
+        configType = Config.Type.DEFAULT,
         expectedCDefaultFieldName = "AERON_PUBLICATION_CONNECTION_TIMEOUT_NS_DEFAULT",
+        isTimeValue = Config.IsTimeValue.TRUE,
+        timeUnit = TimeUnit.NANOSECONDS,
         defaultType = DefaultType.LONG,
         defaultLong = 5L * 1000 * 1000 * 1000)
     public static final long PUBLICATION_CONNECTION_TIMEOUT_DEFAULT_NS = TimeUnit.SECONDS.toNanos(5);
@@ -429,7 +466,10 @@ public final class Configuration
      * <p>
      * If true then this will override the min group size of the min and tagged flow control strategies.
      */
-    @Config(defaultType = DefaultType.BOOLEAN, defaultBoolean = false)
+    @Config(
+        uriParam = CommonContext.SPIES_SIMULATE_CONNECTION_PARAM_NAME,
+        defaultType = DefaultType.BOOLEAN,
+        defaultBoolean = false)
     public static final String SPIES_SIMULATE_CONNECTION_PROP_NAME = "aeron.spies.simulate.connection";
 
     /**
@@ -534,6 +574,7 @@ public final class Configuration
     public static final String UNICAST_FLOW_CONTROL_STRATEGY_PROP_NAME = "aeron.unicast.flow.control.strategy";
 
     /**
+     *
      */
     @Config
     public static final String UNICAST_FLOW_CONTROL_STRATEGY_DEFAULT = "io.aeron.driver.UnicastFlowControl";
@@ -551,6 +592,7 @@ public final class Configuration
     public static final String MULTICAST_FLOW_CONTROL_STRATEGY_PROP_NAME = "aeron.multicast.flow.control.strategy";
 
     /**
+     *
      */
     @Config
     public static final String MULTICAST_FLOW_CONTROL_STRATEGY_DEFAULT = "io.aeron.driver.MaxMulticastFlowControl";
@@ -592,7 +634,7 @@ public final class Configuration
      * Length of the maximum transmission unit of the media driver's protocol. If this is greater
      * than the network MTU for UDP then the packet will be fragmented and can amplify the impact of loss.
      */
-    @Config
+    @Config(uriParam = CommonContext.MTU_LENGTH_PARAM_NAME)
     public static final String MTU_LENGTH_PROP_NAME = "aeron.mtu.length";
 
     /**
@@ -601,19 +643,20 @@ public final class Configuration
      * <p>
      * On networks that suffer little congestion then a larger value can be used to reduce syscall costs.
      */
-    @Config
+    @Config(configType = Config.Type.DEFAULT)
     public static final int MTU_LENGTH_DEFAULT = 1408;
 
     /**
      * Length of the maximum transmission unit of the media driver's protocol for IPC. This can be larger than the
      * UDP version but if recorded replay needs to be considered.
      */
-    @Config
+    @Config(uriParam = CommonContext.MTU_LENGTH_PARAM_NAME)
     public static final String IPC_MTU_LENGTH_PROP_NAME = "aeron.ipc.mtu.length";
 
     /**
+     *
      */
-    @Config
+    @Config(configType = Config.Type.DEFAULT)
     public static final int IPC_MTU_LENGTH_DEFAULT = MTU_LENGTH_DEFAULT;
 
     /**
@@ -637,6 +680,8 @@ public final class Configuration
     @Config(
         id = "TIMER_INTERVAL",
         expectedCDefaultFieldName = "AERON_TIMER_INTERVAL_NS_DEFAULT",
+        isTimeValue = Config.IsTimeValue.TRUE,
+        timeUnit = TimeUnit.NANOSECONDS,
         defaultType = DefaultType.LONG,
         defaultLong = 1000 * 1000 * 1000)
     public static final long DEFAULT_TIMER_INTERVAL_NS = TimeUnit.SECONDS.toNanos(1);
@@ -653,6 +698,8 @@ public final class Configuration
     @Config(
         id = "COUNTER_FREE_TO_REUSE_TIMEOUT",
         expectedCDefaultFieldName = "AERON_COUNTERS_FREE_TO_REUSE_TIMEOUT_NS_DEFAULT",
+        isTimeValue = Config.IsTimeValue.TRUE,
+        timeUnit = TimeUnit.NANOSECONDS,
         defaultType = DefaultType.LONG,
         defaultLong = 1000 * 1000 * 1000)
     public static final long DEFAULT_COUNTER_FREE_TO_REUSE_TIMEOUT_NS = TimeUnit.SECONDS.toNanos(1);
@@ -776,17 +823,23 @@ public final class Configuration
     /**
      * Unicast NAK delay in nanoseconds property name.
      */
-    @Config
+    @Config(uriParam = CommonContext.NAK_DELAY_PARAM_NAME)
     public static final String NAK_UNICAST_DELAY_PROP_NAME = "aeron.nak.unicast.delay";
+
+    /**
+     * Minimum supported value for {@link #NAK_UNICAST_DELAY_PROP_NAME} which is {@code 1us} (one microsecond).
+     */
+    public static final long NAK_UNICAST_DELAY_MIN_VALUE_NS = 1000L;
 
     /**
      * Default Unicast NAK delay in nanoseconds.
      */
     @Config(
         expectedCDefaultFieldName = "AERON_NAK_UNICAST_DELAY_NS_DEFAULT",
-        defaultType = DefaultType.LONG,
-        defaultLong = 100 * 1000)
-    public static final long NAK_UNICAST_DELAY_DEFAULT_NS = TimeUnit.MICROSECONDS.toNanos(100);
+        isTimeValue = Config.IsTimeValue.TRUE,
+        timeUnit = TimeUnit.NANOSECONDS,
+        defaultLong = NAK_UNICAST_DELAY_MIN_VALUE_NS)
+    public static final long NAK_UNICAST_DELAY_DEFAULT_NS = NAK_UNICAST_DELAY_MIN_VALUE_NS;
 
     /**
      * Unicast NAK retry delay ratio property name.
@@ -811,6 +864,8 @@ public final class Configuration
      */
     @Config(
         expectedCDefaultFieldName = "AERON_RETRANSMIT_UNICAST_DELAY_NS_DEFAULT",
+        isTimeValue = Config.IsTimeValue.TRUE,
+        timeUnit = TimeUnit.NANOSECONDS,
         defaultType = DefaultType.LONG,
         defaultLong = 0)
     public static final long RETRANSMIT_UNICAST_DELAY_DEFAULT_NS = TimeUnit.NANOSECONDS.toNanos(0);
@@ -826,6 +881,8 @@ public final class Configuration
      */
     @Config(
         expectedCDefaultFieldName = "AERON_RETRANSMIT_UNICAST_LINGER_NS_DEFAULT",
+        isTimeValue = Config.IsTimeValue.TRUE,
+        timeUnit = TimeUnit.NANOSECONDS,
         defaultType = DefaultType.LONG,
         defaultLong = 10L * 1000 * 1000)
     public static final long RETRANSMIT_UNICAST_LINGER_DEFAULT_NS = TimeUnit.MILLISECONDS.toNanos(10);
@@ -834,7 +891,10 @@ public final class Configuration
      * Property name of the timeout for when an untethered subscription that is outside the window limit will
      * participate in local flow control.
      */
-    @Config
+    @Config(
+        uriParam = CommonContext.UNTETHERED_WINDOW_LIMIT_TIMEOUT_PARAM_NAME,
+        isTimeValue = Config.IsTimeValue.TRUE,
+        timeUnit = TimeUnit.NANOSECONDS)
     public static final String UNTETHERED_WINDOW_LIMIT_TIMEOUT_PROP_NAME = "aeron.untethered.window.limit.timeout";
 
     /**
@@ -851,7 +911,10 @@ public final class Configuration
      * Property name of the timeout for when an untethered subscription is resting after not being able to keep up
      * before it is allowed to rejoin a stream.
      */
-    @Config
+    @Config(
+        uriParam = CommonContext.UNTETHERED_RESTING_TIMEOUT_PARAM_NAME,
+        isTimeValue = Config.IsTimeValue.TRUE,
+        timeUnit = TimeUnit.NANOSECONDS)
     public static final String UNTETHERED_RESTING_TIMEOUT_PROP_NAME = "aeron.untethered.resting.timeout";
 
     /**
@@ -863,6 +926,17 @@ public final class Configuration
         defaultLong = 10_000_000_000L,
         expectedCDefaultFieldName = "AERON_UNTETHERED_RESTING_TIMEOUT_NS_DEFAULT")
     public static final long UNTETHERED_RESTING_TIMEOUT_DEFAULT_NS = TimeUnit.SECONDS.toNanos(10);
+
+    /**
+     * Property name of the timeout for an untethered subscription to stay in the linger state.
+     */
+    @Config(
+        uriParam = CommonContext.UNTETHERED_LINGER_TIMEOUT_PARAM_NAME,
+        isTimeValue = Config.IsTimeValue.TRUE,
+        timeUnit = TimeUnit.NANOSECONDS,
+        defaultType = DefaultType.LONG,
+        defaultLong = Aeron.NULL_VALUE)
+    public static final String UNTETHERED_LINGER_TIMEOUT_PROP_NAME = "aeron.untethered.linger.timeout";
 
     /**
      * Property name of the max number of active retransmissions tracked for udp streams with group semantics.
@@ -894,13 +968,14 @@ public final class Configuration
     /**
      * Property name for default boolean value for if a stream can be rejoined. True to allow stream rejoin.
      */
-    @Config(defaultType = DefaultType.BOOLEAN, defaultBoolean = true)
+    @Config(uriParam = CommonContext.REJOIN_PARAM_NAME, defaultType = DefaultType.BOOLEAN, defaultBoolean = true)
     public static final String REJOIN_STREAM_PROP_NAME = "aeron.rejoin.stream";
 
     /**
      * Property name for default group tag (gtag) to send in all Status Messages.
      */
     @Config(
+        uriParam = CommonContext.GROUP_TAG_PARAM_NAME,
         defaultType = DefaultType.LONG,
         defaultLong = 0,
         expectedCDefaultFieldName = "AERON_RECEIVER_GROUP_TAG_VALUE_DEFAULT",
@@ -920,6 +995,12 @@ public final class Configuration
     public static final String FLOW_CONTROL_GROUP_MIN_SIZE_PROP_NAME = "aeron.flow.control.group.min.size";
 
     /**
+     * Property name for flow control timeout after which with no status messages the receiver is considered gone.
+     */
+    @Config(expectedCDefaultFieldName = "AERON_FLOW_CONTROL_RECEIVER_TIMEOUT_NS_DEFAULT")
+    public static final String FLOW_CONTROL_RECEIVER_TIMEOUT_PROP_NAME = "aeron.flow.control.receiver.timeout";
+
+    /**
      * Default value for the receiver timeout used to determine if the receiver should still be monitored for
      * flow control purposes.
      */
@@ -927,20 +1008,18 @@ public final class Configuration
     public static final long FLOW_CONTROL_RECEIVER_TIMEOUT_DEFAULT_NS = TimeUnit.SECONDS.toNanos(5);
 
     /**
-     * Property name for flow control timeout after which with no status messages the receiver is considered gone.
+     * Property name for default retransmit receiver window multiple used by the unicast flow control strategy.
      */
-    @Config(
-        expectedCEnvVarFieldName = "AERON_MIN_MULTICAST_FLOW_CONTROL_RECEIVER_TIMEOUT_ENV_VAR",
-        expectedCEnvVar = "AERON_MIN_MULTICAST_FLOW_CONTROL_RECEIVER_TIMEOUT",
-        expectedCDefaultFieldName = "AERON_FLOW_CONTROL_RECEIVER_TIMEOUT_NS_DEFAULT")
-    public static final String FLOW_CONTROL_RECEIVER_TIMEOUT_PROP_NAME = "aeron.flow.control.receiver.timeout";
+    @Config(defaultType = DefaultType.INT, defaultInt = 16)
+    public static final String UNICAST_FLOW_CONTROL_RETRANSMIT_RECEIVER_WINDOW_MULTIPLE_PROP_NAME =
+        "aeron.unicast.flow.control.rrwm";
 
     /**
+     * Property name for default retransmit receiver window multiple used by multicast flow control strategies.
      */
-    // TODO is this supposed to be deprecated?
-    @Config(defaultType = DefaultType.LONG, defaultLong = 5_000_000_000L, hasContext = false, existsInC = false)
-    private static final String MIN_FLOW_CONTROL_TIMEOUT_OLD_PROP_NAME =
-        "aeron.MinMulticastFlowControl.receiverTimeout";
+    @Config(defaultType = DefaultType.INT, defaultInt = 4)
+    public static final String MULTICAST_FLOW_CONTROL_RETRANSMIT_RECEIVER_WINDOW_MULTIPLE_PROP_NAME =
+        "aeron.multicast.flow.control.rrwm";
 
     /**
      * Property name for resolver name of the Media Driver used in name resolution.
@@ -991,9 +1070,9 @@ public final class Configuration
      */
     @Config(
         defaultType = DefaultType.LONG,
-        defaultLong = 1_000_000_000L,
+        defaultLong = 1_000_000L,
         expectedCDefaultFieldName = "AERON_DRIVER_CONDUCTOR_CYCLE_THRESHOLD_NS_DEFAULT")
-    public static final long CONDUCTOR_CYCLE_THRESHOLD_DEFAULT_NS = TimeUnit.MILLISECONDS.toNanos(1000);
+    public static final long CONDUCTOR_CYCLE_THRESHOLD_DEFAULT_NS = TimeUnit.MILLISECONDS.toNanos(1);
 
     /**
      * Property name for threshold value for the sender work cycle threshold to track for being exceeded.
@@ -1006,9 +1085,9 @@ public final class Configuration
      */
     @Config(
         defaultType = DefaultType.LONG,
-        defaultLong = 1_000_000_000L,
+        defaultLong = 1_000_000L,
         expectedCDefaultFieldName = "AERON_DRIVER_SENDER_CYCLE_THRESHOLD_NS_DEFAULT")
-    public static final long SENDER_CYCLE_THRESHOLD_DEFAULT_NS = TimeUnit.MILLISECONDS.toNanos(1000);
+    public static final long SENDER_CYCLE_THRESHOLD_DEFAULT_NS = TimeUnit.MILLISECONDS.toNanos(1);
 
     /**
      * Property name for threshold value for the receiver work cycle threshold to track for being exceeded.
@@ -1021,9 +1100,9 @@ public final class Configuration
      */
     @Config(
         defaultType = DefaultType.LONG,
-        defaultLong = 1_000_000_000,
+        defaultLong = 1_000_000L,
         expectedCDefaultFieldName = "AERON_DRIVER_RECEIVER_CYCLE_THRESHOLD_NS_DEFAULT")
-    public static final long RECEIVER_CYCLE_THRESHOLD_DEFAULT_NS = TimeUnit.MILLISECONDS.toNanos(1000);
+    public static final long RECEIVER_CYCLE_THRESHOLD_DEFAULT_NS = TimeUnit.MILLISECONDS.toNanos(1);
 
     /**
      * Property name for threshold value for the name resolution threshold to track for being exceeded.
@@ -1138,7 +1217,7 @@ public final class Configuration
      */
     public static boolean termBufferSparseFile()
     {
-        return "true".equals(getProperty(TERM_BUFFER_SPARSE_FILE_PROP_NAME));
+        return "true".equals(getProperty(TERM_BUFFER_SPARSE_FILE_PROP_NAME, "true"));
     }
 
     /**
@@ -1284,9 +1363,7 @@ public final class Configuration
      */
     public static long nakUnicastRetryDelayRatio()
     {
-        final long ratio = getLong(NAK_UNICAST_RETRY_DELAY_RATIO_PROP_NAME, NAK_UNICAST_RETRY_DELAY_RATIO_DEFAULT);
-        validateValueRange(ratio, 1, Long.MAX_VALUE, NAK_UNICAST_RETRY_DELAY_RATIO_PROP_NAME);
-        return ratio;
+        return getSizeAsLong(NAK_UNICAST_RETRY_DELAY_RATIO_PROP_NAME, NAK_UNICAST_RETRY_DELAY_RATIO_DEFAULT);
     }
 
     /**
@@ -1347,6 +1424,18 @@ public final class Configuration
     {
         return getDurationInNanos(
             UNTETHERED_WINDOW_LIMIT_TIMEOUT_PROP_NAME, UNTETHERED_WINDOW_LIMIT_TIMEOUT_DEFAULT_NS);
+    }
+
+    /**
+     * The timeout for an untethered subscription to remain in the linger state.
+     *
+     * @return the timeout for an untethered subscription to remain in the linger state.
+     * @see #UNTETHERED_LINGER_TIMEOUT_PROP_NAME
+     * @since 1.48.0
+     */
+    public static long untetheredLingerTimeoutNs()
+    {
+        return getDurationInNanos(UNTETHERED_LINGER_TIMEOUT_PROP_NAME, Aeron.NULL_VALUE);
     }
 
     /**
@@ -1433,9 +1522,29 @@ public final class Configuration
      */
     public static long flowControlReceiverTimeoutNs()
     {
-        return getDurationInNanos(
-            FLOW_CONTROL_RECEIVER_TIMEOUT_PROP_NAME,
-            getDurationInNanos(MIN_FLOW_CONTROL_TIMEOUT_OLD_PROP_NAME, FLOW_CONTROL_RECEIVER_TIMEOUT_DEFAULT_NS));
+        return getDurationInNanos(FLOW_CONTROL_RECEIVER_TIMEOUT_PROP_NAME, FLOW_CONTROL_RECEIVER_TIMEOUT_DEFAULT_NS);
+    }
+
+    /**
+     * Retransmit receiver window multiple used by the unicast flow control strategy to determine the maximum
+     * amount of data to retransmit.
+     *
+     * @return multiple.
+     */
+    public static int unicastFlowControlRetransmitReceiverWindowMultiple()
+    {
+        return getInteger(UNICAST_FLOW_CONTROL_RETRANSMIT_RECEIVER_WINDOW_MULTIPLE_PROP_NAME, 16);
+    }
+
+    /**
+     * Retransmit receiver window multiple used by multicast flow control strategies to determine the maximum
+     * amount of data to retransmit.
+     *
+     * @return multiple.
+     */
+    public static int multicastFlowControlRetransmitReceiverWindowMultiple()
+    {
+        return getInteger(MULTICAST_FLOW_CONTROL_RETRANSMIT_RECEIVER_WINDOW_MULTIPLE_PROP_NAME, 4);
     }
 
     /**
@@ -2160,7 +2269,7 @@ public final class Configuration
      *
      * @return configured session limit
      * @throws AsciiNumberFormatException if the property referenced by {@link #STREAM_SESSION_LIMIT_PROP_NAME} is not
-     * a valid number
+     *                                    a valid number
      */
     public static int streamSessionLimit()
     {
@@ -2366,13 +2475,17 @@ public final class Configuration
     /**
      * Validate that the timeouts for untethered subscriptions are greater than timer interval.
      *
-     * @param untetheredWindowLimitTimeoutNs after which an untethered subscription will be lingered.
-     * @param untetheredRestingTimeoutNs     after which an untethered subscription that is lingered can become active.
+     * @param untetheredWindowLimitTimeoutNs after which an active untethered subscription will be lingered.
+     * @param untetheredLingerTimeoutNs      after which a lingering untethered subscription will transition to resting.
+     * @param untetheredRestingTimeoutNs     after which a resting untethered subscription will become active again.
      * @param timerIntervalNs                interval at which the driver will check timeouts.
      * @throws ConfigurationException if the values are not valid.
      */
     public static void validateUntetheredTimeouts(
-        final long untetheredWindowLimitTimeoutNs, final long untetheredRestingTimeoutNs, final long timerIntervalNs)
+        final long untetheredWindowLimitTimeoutNs,
+        final long untetheredLingerTimeoutNs,
+        final long untetheredRestingTimeoutNs,
+        final long timerIntervalNs)
     {
         if (untetheredWindowLimitTimeoutNs <= timerIntervalNs)
         {
@@ -2386,6 +2499,13 @@ public final class Configuration
             throw new ConfigurationException(
                 "untetheredRestingTimeoutNs=" + untetheredRestingTimeoutNs +
                 " <= timerIntervalNs=" + timerIntervalNs);
+        }
+
+        if (Aeron.NULL_VALUE != untetheredLingerTimeoutNs && untetheredLingerTimeoutNs <= timerIntervalNs)
+        {
+            throw new ConfigurationException(
+                "untetheredLingerTimeoutNs=" + untetheredLingerTimeoutNs +
+                    " <= timerIntervalNs=" + timerIntervalNs);
         }
     }
 

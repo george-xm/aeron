@@ -19,6 +19,7 @@ import io.aeron.CommonContext;
 import io.aeron.archive.Archive;
 import io.aeron.driver.MediaDriver;
 import org.agrona.CloseHelper;
+import org.agrona.concurrent.ShutdownSignalBarrier;
 
 import static org.agrona.SystemUtil.loadPropertiesFiles;
 
@@ -41,13 +42,18 @@ public class ClusteredArchive implements AutoCloseable
      *
      * @param args command line argument which is a list for properties files as URLs or filenames.
      */
+    @SuppressWarnings("try")
     public static void main(final String[] args)
     {
         loadPropertiesFiles(args);
 
-        try (ClusteredArchive driver = launch())
+        try (ShutdownSignalBarrier barrier = new ShutdownSignalBarrier();
+            ClusteredArchive ignored = launch(
+                CommonContext.getAeronDirectoryName(),
+                new Archive.Context(),
+                new ConsensusModule.Context().terminationHook(barrier::signalAll)))
         {
-            driver.consensusModule().context().shutdownSignalBarrier().await();
+            barrier.await();
             System.out.println("Shutdown ClusteredArchive...");
         }
     }

@@ -19,7 +19,14 @@ import io.aeron.ChannelUri;
 import io.aeron.ExclusivePublication;
 import io.aeron.Publication;
 import io.aeron.cluster.client.ClusterException;
-import io.aeron.cluster.codecs.*;
+import io.aeron.cluster.codecs.ClusterAction;
+import io.aeron.cluster.codecs.ClusterActionRequestEncoder;
+import io.aeron.cluster.codecs.MessageHeaderEncoder;
+import io.aeron.cluster.codecs.NewLeadershipTermEventEncoder;
+import io.aeron.cluster.codecs.SessionCloseEventEncoder;
+import io.aeron.cluster.codecs.SessionMessageHeaderEncoder;
+import io.aeron.cluster.codecs.SessionOpenEventEncoder;
+import io.aeron.cluster.codecs.TimerEventEncoder;
 import io.aeron.cluster.service.ClusterClock;
 import io.aeron.logbuffer.BufferClaim;
 import io.aeron.protocol.DataHeaderFlyweight;
@@ -177,8 +184,6 @@ final class LogPublisher
         final long timestamp,
         final TimeUnit timeUnit)
     {
-        logAppendSessionClose(memberId, session.id(), session.closeReason(), leadershipTermId, timestamp, timeUnit);
-
         final int length = MessageHeaderEncoder.ENCODED_LENGTH + SessionCloseEventEncoder.BLOCK_LENGTH;
 
         int attempts = SEND_ATTEMPTS;
@@ -325,16 +330,6 @@ final class LogPublisher
             throw new ClusterException(
                 "log publication at max position: term-length=" + publication.termBufferLength());
         }
-    }
-
-    private static void logAppendSessionClose(
-        final int memberId,
-        final long id,
-        final CloseReason closeReason,
-        final long leadershipTermId,
-        final long timestamp,
-        final TimeUnit timeUnit)
-    {
     }
 
     /**

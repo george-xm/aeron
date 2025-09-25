@@ -23,12 +23,23 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 
 import static io.aeron.CommonContext.SESSION_ID_PARAM_NAME;
 import static io.aeron.CommonContext.STREAM_ID_PARAM_NAME;
-import static java.util.concurrent.TimeUnit.*;
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+import static java.util.concurrent.TimeUnit.MICROSECONDS;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertThrowsExactly;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.anyInt;
+import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 class PublicationParamsTest
 {
@@ -441,4 +452,54 @@ class PublicationParamsTest
         assertEquals(timeoutNs, params.untetheredRestingTimeoutNs);
     }
 
+    @Test
+    void shouldHonorPrecedenceForUntetheredLingerTimeoutWithDefaultsInContext()
+    {
+
+        // context
+        final ChannelUri channelUri = ChannelUri.parse(
+            "aeron:udp?endpoint=localhost:5555|untethered-window-limit-timeout=444ms");
+        final PublicationParams params =
+            PublicationParams.getPublicationParams(channelUri, ctx, conductor, 1, channelUri.media());
+        assertEquals(TimeUnit.MILLISECONDS.toNanos(444), params.untetheredWindowLimitTimeoutNs);
+        assertEquals(TimeUnit.MILLISECONDS.toNanos(444), params.untetheredLingerTimeoutNs);
+
+    }
+
+    @Test
+    void shouldHonorPrecedenceForUntetheredLingerTimeoutWithOverriddenContext()
+    {
+        ctx.untetheredLingerTimeoutNs(TimeUnit.MILLISECONDS.toNanos(555));
+
+        // context
+        final ChannelUri channelUri = ChannelUri.parse(
+            "aeron:udp?endpoint=localhost:5555|untethered-window-limit-timeout=444ms");
+        final PublicationParams params =
+            PublicationParams.getPublicationParams(channelUri, ctx, conductor, 1, channelUri.media());
+        assertEquals(TimeUnit.MILLISECONDS.toNanos(444), params.untetheredWindowLimitTimeoutNs);
+        assertEquals(TimeUnit.MILLISECONDS.toNanos(555), params.untetheredLingerTimeoutNs);
+    }
+
+    @Test
+    void shouldHonorChannelOverrideForUntetheredLingerTimeout()
+    {
+        ctx.untetheredLingerTimeoutNs(TimeUnit.MILLISECONDS.toNanos(555));
+
+        // context
+        final ChannelUri channelUri = ChannelUri.parse(
+            "aeron:udp?endpoint=localhost:5555|untethered-window-limit-timeout=444ms|untethered-linger-timeout=333ms");
+        final PublicationParams params =
+            PublicationParams.getPublicationParams(channelUri, ctx, conductor, 1, channelUri.media());
+        assertEquals(TimeUnit.MILLISECONDS.toNanos(444), params.untetheredWindowLimitTimeoutNs);
+        assertEquals(TimeUnit.MILLISECONDS.toNanos(333), params.untetheredLingerTimeoutNs);
+    }
+
+    @Test
+    void shouldDiscardSessionIdIfNotInteger()
+    {
+        final ChannelUri channelUri = ChannelUri.parse("aeron:ipc?session-id=abc");
+        final InvalidChannelException exception = assertThrowsExactly(InvalidChannelException.class,
+            () -> PublicationParams.getPublicationParams(channelUri, ctx, conductor, 1, channelUri.media()));
+        assertEquals("ERROR - invalid session-id, must be a number", exception.getMessage());
+    }
 }

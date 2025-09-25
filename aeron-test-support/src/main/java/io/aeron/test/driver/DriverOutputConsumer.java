@@ -20,15 +20,15 @@ import java.util.Map;
 
 public interface DriverOutputConsumer
 {
-    default void outputFiles(String aeronDirectoryName, File stdoutFile, File stderrFile)
+    default void outputFiles(final String aeronDirectoryName, final File stdoutFile, final File stderrFile)
     {
     }
 
-    default void exitCode(String aeronDirectoryName, int exitValue, String exitMessage)
+    default void exitCode(final String aeronDirectoryName, final int exitValue, final String exitMessage)
     {
     }
 
-    default void environmentVariables(String aeronDirectoryName, Map<String, String> environment)
+    default void environmentVariables(final String aeronDirectoryName, final Map<String, String> environment)
     {
     }
 }

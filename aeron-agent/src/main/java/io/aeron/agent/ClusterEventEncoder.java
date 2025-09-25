@@ -489,36 +489,6 @@ final class ClusterEventEncoder
         return logHeaderLength + bodyLength;
     }
 
-    static int addPassiveMemberLength(final String endpoints)
-    {
-        return SIZE_OF_LONG + 2 * SIZE_OF_INT + endpoints.length();
-    }
-
-    static int encodeOnAddPassiveMember(
-        final UnsafeBuffer encodingBuffer,
-        final int offset,
-        final int captureLength,
-        final int length,
-        final int memberId,
-        final long correlationId,
-        final String memberEndpoints)
-    {
-        final int logHeaderLength = encodeLogHeader(encodingBuffer, offset, captureLength, length);
-        final int bodyOffset = offset + logHeaderLength;
-        int bodyLength = 0;
-
-        encodingBuffer.putLong(bodyOffset + bodyLength, correlationId, LITTLE_ENDIAN);
-        bodyLength += SIZE_OF_LONG;
-
-        encodingBuffer.putInt(bodyOffset + bodyLength, memberId, LITTLE_ENDIAN);
-        bodyLength += SIZE_OF_INT;
-
-        bodyLength += encodeTrailingString(
-            encodingBuffer, bodyOffset + bodyLength, captureLength - bodyLength, memberEndpoints);
-
-        return logHeaderLength + bodyLength;
-    }
-
     static int appendSessionCloseLength(final CloseReason closeReason, final TimeUnit timeUnit)
     {
         return 3 * SIZE_OF_LONG + SIZE_OF_INT + (SIZE_OF_INT + enumName(closeReason).length()) +

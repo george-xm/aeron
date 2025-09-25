@@ -130,26 +130,11 @@ public final class ReceiveDestinationTransport extends ReceiveDestinationTranspo
      */
     public void openChannel(final DriverConductorProxy conductorProxy, final AtomicCounter statusIndicator)
     {
-        if (conductorProxy.notConcurrent())
-        {
-            openDatagramChannel(statusIndicator);
-        }
-        else
-        {
-            try
-            {
-                openDatagramChannel(statusIndicator);
-            }
-            catch (final Exception ex)
-            {
-                conductorProxy.channelEndpointError(statusIndicator.id(), ex);
-                throw ex;
-            }
-        }
+        openDatagramChannel(statusIndicator);
 
         LocalSocketAddressStatus.updateBindAddress(
             localSocketAddressIndicator, bindAddressAndPort(), context.countersMetaDataBuffer());
-        localSocketAddressIndicator.setOrdered(ChannelEndpointStatus.ACTIVE);
+        localSocketAddressIndicator.setRelease(ChannelEndpointStatus.ACTIVE);
     }
 
     /**

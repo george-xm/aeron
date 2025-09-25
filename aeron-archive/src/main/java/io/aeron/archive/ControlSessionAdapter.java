@@ -103,12 +103,13 @@ class ControlSessionAdapter implements FragmentHandler
                 final Image image = (Image)header.context();
 
                 final ControlSession session = conductor.newControlSession(
-                    image.correlationId(),
+                    image,
                     decoder.correlationId(),
                     decoder.responseStreamId(),
                     decoder.version(),
                     decoder.responseChannel(),
                     ArrayUtil.EMPTY_BYTE_ARRAY,
+                    "",
                     this);
                 controlSessionByIdMap.put(session.sessionId(), new SessionInfo(image, session));
                 break;
@@ -738,17 +739,20 @@ class ControlSessionAdapter implements FragmentHandler
                 else
                 {
                     credentials = ArrayUtil.EMPTY_BYTE_ARRAY;
+                    decoder.skipEncodedCredentials();
                 }
+                final String clientInfo = decoder.clientInfo();
 
                 final Image image = (Image)header.context();
 
                 final ControlSession session = conductor.newControlSession(
-                    image.correlationId(),
+                    image,
                     decoder.correlationId(),
                     decoder.responseStreamId(),
                     decoder.version(),
                     responseChannel,
                     credentials,
+                    clientInfo,
                     this);
                 controlSessionByIdMap.put(session.sessionId(), new SessionInfo(image, session));
                 break;
@@ -1051,10 +1055,11 @@ class ControlSessionAdapter implements FragmentHandler
     {
         for (final SessionInfo info : controlSessionByIdMap.values())
         {
-            if (info.image == image)
+            if (info.image == image && !info.controlSession.isDone())
             {
                 final Subscription subscription = image.subscription();
-                info.controlSession.abort("request publication image unavailable:" +
+                info.controlSession.abort(ControlSession.REQUEST_IMAGE_NOT_AVAILABLE_MSG +
+                    " : controlSessionId=" + info.controlSession.sessionId() +
                     " image.correlationId=" + image.correlationId() +
                     " sessionId=" + image.sessionId() +
                     " streamId=" + subscription.streamId() +
@@ -1064,10 +1069,19 @@ class ControlSessionAdapter implements FragmentHandler
         }
     }
 
-    void removeControlSession(final long controlSessionId)
+    void removeControlSession(final long controlSessionId, final boolean sessionAborted, final String abortReason)
     {
-        controlSessionByIdMap.remove(controlSessionId);
+        final SessionInfo sessionInfo = controlSessionByIdMap.remove(controlSessionId);
+        if (null != sessionInfo && sessionAborted)
+        {
+            sessionInfo.image.reject(abortReason);
+        }
         conductor.removeReplayTokensForSession(controlSessionId);
+        final Counter controlSessionsCounter = conductor.context().controlSessionsCounter();
+        if (!controlSessionsCounter.isClosed())
+        {
+            controlSessionsCounter.decrementRelease();
+        }
     }
 
     private ControlSession setupSessionAndChannelForReplay(

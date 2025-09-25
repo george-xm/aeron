@@ -125,8 +125,8 @@ class Election
         this.timeOfLastCommitPositionUpdateNs = initialTimeOfLastUpdateNs;
 
         Objects.requireNonNull(thisMember);
-        ctx.electionStateCounter().setOrdered(INIT.code());
-        ctx.electionCounter().incrementOrdered();
+        ctx.electionStateCounter().setRelease(INIT.code());
+        ctx.electionCounter().incrementRelease();
 
         if (clusterMembers.length == 1 && thisMember.id() == clusterMembers[0].id())
         {
@@ -334,7 +334,7 @@ class Election
             return;
         }
 
-        if (isPassiveMember() || candidateId == thisMember.id())
+        if (candidateId == thisMember.id())
         {
             return;
         }
@@ -555,7 +555,15 @@ class Election
         }
         else if (leadershipTermId > this.leadershipTermId && LEADER_READY == state)
         {
-            throw new ClusterEvent("new leader detected due to commit position");
+            throw new ClusterEvent("new leader detected due to commit position - " +
+                " memberId=" + thisMemberId() +
+                " this.leadershipTermId=" + this.leadershipTermId +
+                " this.leaderMemberId=" + thisMemberId() +
+                " this.logPosition=" + this.logPosition +
+                " newLeadershipTermId=" + leadershipTermId +
+                " newLeaderMemberId=" + leaderMemberId +
+                " newLogPosition=" + logPosition +
+                ")");
         }
     }
 
@@ -660,7 +668,7 @@ class Election
             workCount++;
         }
 
-        if (isPassiveMember() || (ctx.appointedLeaderId() != NULL_VALUE && ctx.appointedLeaderId() != thisMember.id()))
+        if (ctx.appointedLeaderId() != NULL_VALUE && ctx.appointedLeaderId() != thisMember.id())
         {
             return workCount;
         }
@@ -915,7 +923,10 @@ class Election
             }
             else
             {
-                state(NULL_POSITION != catchupJoinPosition ? FOLLOWER_CATCHUP_INIT : FOLLOWER_LOG_INIT, nowNs, "");
+                state(
+                    NULL_POSITION != catchupJoinPosition ? FOLLOWER_CATCHUP_INIT : FOLLOWER_LOG_INIT,
+                    nowNs,
+                    "skip log replay");
             }
         }
         else
@@ -925,7 +936,10 @@ class Election
             {
                 stopReplay();
                 logPosition = appendPosition;
-                state(NULL_POSITION != catchupJoinPosition ? FOLLOWER_CATCHUP_INIT : FOLLOWER_LOG_INIT, nowNs, "");
+                state(
+                    NULL_POSITION != catchupJoinPosition ? FOLLOWER_CATCHUP_INIT : FOLLOWER_LOG_INIT,
+                    nowNs,
+                    "log replay done");
             }
         }
 
@@ -1320,7 +1334,7 @@ class Election
                 reason);
 
             state = newState;
-            ctx.electionStateCounter().setOrdered(newState.code());
+            ctx.electionStateCounter().setRelease(newState.code());
             timeOfLastStateChangeNs = nowNs;
             timeOfLastUpdateNs = initialTimeOfLastUpdateNs;
             timeOfLastCommitPositionUpdateNs = initialTimeOfLastUpdateNs;
@@ -1362,11 +1376,6 @@ class Election
         lastPublishedCommitPosition = 0;
     }
 
-    private boolean isPassiveMember()
-    {
-        return null == ClusterMember.findMember(clusterMembers, thisMember.id());
-    }
-
     private void ensureRecordingLogCoherent(
         final long leadershipTermId,
         final long termBaseLogPosition,
@@ -1396,7 +1405,7 @@ class Election
     {
         if (NULL_VALUE == recordingId)
         {
-            // This can happen during a dynamic join/log replication if the initial appendPosition != 0 and
+            // This can happen during a log replication if the initial appendPosition != 0 and
             // nextTermLogPosition == appendPosition.
             return;
         }

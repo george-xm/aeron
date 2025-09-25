@@ -244,7 +244,7 @@ class ControlSessionAdapterTest
         final int connectRequestLength = connectRequestEncoder.encodedLength();
 
         doReturn(mockSession).when(mockConductor).newControlSession(
-            anyLong(), anyLong(), anyInt(), anyInt(), any(), any(), any());
+            any(), anyLong(), anyInt(), anyInt(), anyString(), any(), anyString(), any());
         doReturn(controlSessionId).when(mockSession).sessionId();
         doReturn(true).when(mockAuthorisationService).isAuthorised(anyInt(), anyInt(), any(), any());
 

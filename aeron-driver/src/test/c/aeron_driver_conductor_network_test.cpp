@@ -313,7 +313,7 @@ TEST_F(DriverConductorNetworkTest, shouldRetryFreeOperationsAfterSubscrptionIsCl
     free_map_raw_log = false;
     int64_t *free_fails_counter = aeron_system_counter_addr(
         &m_conductor.m_conductor.system_counters, AERON_SYSTEM_COUNTER_FREE_FAILS);
-    EXPECT_EQ(aeron_counter_get(free_fails_counter), 0);
+    EXPECT_EQ(aeron_counter_get_plain(free_fails_counter), 0);
 
     doWorkForNs(
         static_cast<int64_t>(timeoutNs),
@@ -324,7 +324,7 @@ TEST_F(DriverConductorNetworkTest, shouldRetryFreeOperationsAfterSubscrptionIsCl
         });
 
     readAllBroadcastsFromConductor(null_broadcast_handler);
-    const int64_t free_fails = aeron_counter_get(free_fails_counter);
+    const int64_t free_fails = aeron_counter_get_plain(free_fails_counter);
     EXPECT_GT(free_fails, 0);
     EXPECT_EQ(aeron_driver_conductor_num_images(&m_conductor.m_conductor), 0u);
     EXPECT_EQ(aeron_driver_conductor_num_active_network_subscriptions(&m_conductor.m_conductor, CHANNEL_1, STREAM_ID_1), 0u);
@@ -333,7 +333,7 @@ TEST_F(DriverConductorNetworkTest, shouldRetryFreeOperationsAfterSubscrptionIsCl
     doWorkUntilDone();
 
     readAllBroadcastsFromConductor(null_broadcast_handler);
-    EXPECT_EQ(aeron_counter_get(free_fails_counter), free_fails);
+    EXPECT_EQ(aeron_counter_get_plain(free_fails_counter), free_fails);
     EXPECT_EQ(aeron_driver_conductor_num_images(&m_conductor.m_conductor), 0u);
     EXPECT_EQ(aeron_driver_conductor_num_active_network_subscriptions(&m_conductor.m_conductor, CHANNEL_1, STREAM_ID_1), 0u);
     ASSERT_EQ(removeSubscription(client_id, remove_correlation_id, sub_id), 0);

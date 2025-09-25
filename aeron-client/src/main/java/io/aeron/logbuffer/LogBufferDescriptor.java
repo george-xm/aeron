@@ -153,6 +153,11 @@ public class LogBufferDescriptor
     public static final int LOG_TETHER_OFFSET;
 
     /**
+     * Offset within the log metadata where the 'publication revoked' status is indicated.
+     */
+    public static final int LOG_IS_PUBLICATION_REVOKED_OFFSET;
+
+    /**
      * Offset within the log metadata where the rejoin property is stored.
      */
     public static final int LOG_REJOIN_OFFSET;
@@ -203,12 +208,17 @@ public class LogBufferDescriptor
     public static final int LOG_PUBLICATION_WINDOW_LENGTH_OFFSET;
 
     /**
-     * Offset within the log metadata where the window limit timeout ns is stored.
+     * Offset within the log metadata where the untethered window limit timeout ns is stored.
      */
     public static final int LOG_UNTETHERED_WINDOW_LIMIT_TIMEOUT_NS_OFFSET;
 
     /**
-     * Offset within the log metadata where the untether resting timeout ns is stored.
+     * Offset within the log metadata where the untethered linger timeout ns is stored.
+     */
+    public static final int LOG_UNTETHERED_LINGER_TIMEOUT_NS_OFFSET;
+
+    /**
+     * Offset within the log metadata where the untethered resting timeout ns is stored.
      */
     public static final int LOG_UNTETHERED_RESTING_TIMEOUT_NS_OFFSET;
 
@@ -348,6 +358,13 @@ public class LogBufferDescriptor
      *  +---------------------------------------------------------------+
      *  |                          Tether                               |
      *  +---------------------------------------------------------------+
+     *  |                     Is publication revoked                    |
+     *  +---------------------------------------------------------------+
+     *  |                         Alignment gap                         |
+     *  +---------------------------------------------------------------+
+     *  |                  Untethered Linger Timeout (ns)               |
+     *  |                                                               |
+     *  +---------------------------------------------------------------+
      * </pre>
      */
     public static final int LOG_META_DATA_LENGTH;
@@ -392,6 +409,8 @@ public class LogBufferDescriptor
         LOG_SIGNAL_EOS_OFFSET = LOG_SPARSE_OFFSET + SIZE_OF_BYTE;
         LOG_SPIES_SIMULATE_CONNECTION_OFFSET = LOG_SIGNAL_EOS_OFFSET + SIZE_OF_BYTE;
         LOG_TETHER_OFFSET = LOG_SPIES_SIMULATE_CONNECTION_OFFSET + SIZE_OF_BYTE;
+        LOG_IS_PUBLICATION_REVOKED_OFFSET = LOG_TETHER_OFFSET + SIZE_OF_BYTE;
+        LOG_UNTETHERED_LINGER_TIMEOUT_NS_OFFSET = LOG_IS_PUBLICATION_REVOKED_OFFSET + SIZE_OF_INT;
 
         LOG_META_DATA_LENGTH = PAGE_MIN_SIZE;
     }
@@ -578,7 +597,7 @@ public class LogBufferDescriptor
      */
     public static void isConnected(final UnsafeBuffer metadataBuffer, final boolean isConnected)
     {
-        metadataBuffer.putIntOrdered(LOG_IS_CONNECTED_OFFSET, isConnected ? 1 : 0);
+        metadataBuffer.putIntRelease(LOG_IS_CONNECTED_OFFSET, isConnected ? 1 : 0);
     }
 
     /**
@@ -600,7 +619,7 @@ public class LogBufferDescriptor
      */
     public static void activeTransportCount(final UnsafeBuffer metadataBuffer, final int numberOfActiveTransports)
     {
-        metadataBuffer.putIntOrdered(LOG_ACTIVE_TRANSPORT_COUNT, numberOfActiveTransports);
+        metadataBuffer.putIntRelease(LOG_ACTIVE_TRANSPORT_COUNT, numberOfActiveTransports);
     }
 
     /**
@@ -622,7 +641,7 @@ public class LogBufferDescriptor
      */
     public static void endOfStreamPosition(final UnsafeBuffer metadataBuffer, final long position)
     {
-        metadataBuffer.putLongOrdered(LOG_END_OF_STREAM_POSITION_OFFSET, position);
+        metadataBuffer.putLongRelease(LOG_END_OF_STREAM_POSITION_OFFSET, position);
     }
 
     /**
@@ -638,14 +657,14 @@ public class LogBufferDescriptor
     }
 
     /**
-     * Set the value of the current active term count for the producer using memory ordered semantics.
+     * Set the value of the current active term count for the producer using memory release semantics.
      *
      * @param metadataBuffer containing the meta data.
      * @param termCount      value of the active term count used by the producer of this log.
      */
     public static void activeTermCountOrdered(final UnsafeBuffer metadataBuffer, final int termCount)
     {
-        metadataBuffer.putIntOrdered(LOG_ACTIVE_TERM_COUNT_OFFSET, termCount);
+        metadataBuffer.putIntRelease(LOG_ACTIVE_TERM_COUNT_OFFSET, termCount);
     }
 
     /**
@@ -1100,6 +1119,28 @@ public class LogBufferDescriptor
     }
 
     /**
+     * Get whether the log's publication was revoked.
+     *
+     * @param metadataBuffer containing the meta data.
+     * @return true if the log's publication was revoked, otherwise false.
+     */
+    public static boolean isPublicationRevoked(final UnsafeBuffer metadataBuffer)
+    {
+        return metadataBuffer.getByte(LOG_IS_PUBLICATION_REVOKED_OFFSET) == 1;
+    }
+
+    /**
+     * Set whether the log's publication was revoked.
+     *
+     * @param metadataBuffer containing the meta data.
+     * @param value          true if the log's publication was revoked, otherwise false.
+     */
+    public static void isPublicationRevoked(final UnsafeBuffer metadataBuffer, final boolean value)
+    {
+        metadataBuffer.putByte(LOG_IS_PUBLICATION_REVOKED_OFFSET, (byte)(value ? 1 : 0));
+    }
+
+    /**
      * Get whether the log is group from the metadata.
      *
      * @param metadataBuffer containing the meta data.
@@ -1384,6 +1425,28 @@ public class LogBufferDescriptor
     public static void untetheredWindowLimitTimeoutNs(final UnsafeBuffer metadataBuffer, final long value)
     {
         metadataBuffer.putLong(LOG_UNTETHERED_WINDOW_LIMIT_TIMEOUT_NS_OFFSET, value);
+    }
+
+    /**
+     * Get the untethered linger timeout in nanoseconds from the metadata.
+     *
+     * @param metadataBuffer containing the meta data.
+     * @return the untethered window limit timeout in nanoseconds.
+     */
+    public static long untetheredLingerTimeoutNs(final UnsafeBuffer metadataBuffer)
+    {
+        return metadataBuffer.getLong(LOG_UNTETHERED_LINGER_TIMEOUT_NS_OFFSET);
+    }
+
+    /**
+     * Set the untethered linger timeout in nanoseconds in the metadata.
+     *
+     * @param metadataBuffer containing the meta data.
+     * @param value          the untethered linger timeout to set.
+     */
+    public static void untetheredLingerTimeoutNs(final UnsafeBuffer metadataBuffer, final long value)
+    {
+        metadataBuffer.putLong(LOG_UNTETHERED_LINGER_TIMEOUT_NS_OFFSET, value);
     }
 
     /**

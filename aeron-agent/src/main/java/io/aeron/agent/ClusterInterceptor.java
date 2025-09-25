@@ -253,18 +253,6 @@ class ClusterInterceptor
         }
     }
 
-    static class AddPassiveMember
-    {
-        @Advice.OnMethodEnter
-        static void logOnAddPassiveMember(
-            final int memberId,
-            final long correlationId,
-            final String passiveMember)
-        {
-            LOGGER.logOnAddPassiveMember(memberId, correlationId, passiveMember);
-        }
-    }
-
     static class AppendSessionClose
     {
         @Advice.OnMethodEnter

@@ -31,6 +31,12 @@ import static org.agrona.concurrent.status.CountersReader.*;
  */
 public final class ClusterCounters
 {
+    /**
+     * Suffix for `clusterId` in the counter label.
+     */
+    public static final String CLUSTER_ID_LABEL_SUFFIX = " - clusterId=";
+    static final String SERVICE_ID_SUFFIX = " serviceId=";
+
     private ClusterCounters()
     {
     }
@@ -58,7 +64,7 @@ public final class ClusterCounters
         final int keyLength = index;
 
         index += tempBuffer.putStringWithoutLengthAscii(index, name);
-        index += tempBuffer.putStringWithoutLengthAscii(index, " - clusterId=");
+        index += tempBuffer.putStringWithoutLengthAscii(index, CLUSTER_ID_LABEL_SUFFIX);
         index += tempBuffer.putIntAscii(index, clusterId);
 
         return aeron.addCounter(typeId, tempBuffer, 0, keyLength, tempBuffer, keyLength, index - keyLength);
@@ -91,7 +97,7 @@ public final class ClusterCounters
         final int keyLength = index;
 
         index += tempBuffer.putStringWithoutLengthAscii(index, name);
-        index += tempBuffer.putStringWithoutLengthAscii(index, " - clusterId=");
+        index += tempBuffer.putStringWithoutLengthAscii(index, CLUSTER_ID_LABEL_SUFFIX);
         index += tempBuffer.putIntAscii(index, clusterId);
         index += AeronCounters.appendVersionInfo(tempBuffer, index, version, commitHashCode);
 
@@ -158,9 +164,9 @@ public final class ClusterCounters
         final int keyLength = index;
 
         index += tempBuffer.putStringWithoutLengthAscii(index, name);
-        index += tempBuffer.putStringWithoutLengthAscii(index, " - clusterId=");
+        index += tempBuffer.putStringWithoutLengthAscii(index, CLUSTER_ID_LABEL_SUFFIX);
         index += tempBuffer.putIntAscii(index, clusterId);
-        index += tempBuffer.putStringWithoutLengthAscii(index, " serviceId=");
+        index += tempBuffer.putStringWithoutLengthAscii(index, SERVICE_ID_SUFFIX);
         index += tempBuffer.putIntAscii(index, serviceId);
 
         return aeron.addCounter(typeId, tempBuffer, 0, keyLength, tempBuffer, keyLength, index - keyLength);
@@ -180,9 +186,9 @@ public final class ClusterCounters
         final int keyLength = index;
 
         index += tempBuffer.putStringWithoutLengthAscii(index, "Cluster Container Errors");
-        index += tempBuffer.putStringWithoutLengthAscii(index, " - clusterId=");
+        index += tempBuffer.putStringWithoutLengthAscii(index, CLUSTER_ID_LABEL_SUFFIX);
         index += tempBuffer.putIntAscii(index, clusterId);
-        index += tempBuffer.putStringWithoutLengthAscii(index, " serviceId=");
+        index += tempBuffer.putStringWithoutLengthAscii(index, SERVICE_ID_SUFFIX);
         index += tempBuffer.putIntAscii(index, serviceId);
         index += AeronCounters.appendVersionInfo(
             tempBuffer, index, ClusteredServiceContainerVersion.VERSION, ClusteredServiceContainerVersion.GIT_SHA);

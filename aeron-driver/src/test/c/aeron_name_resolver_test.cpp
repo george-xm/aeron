@@ -249,7 +249,7 @@ protected:
 
     static int64_t readSystemCounter(const resolver_fields_t *resolver, aeron_system_counter_enum_t counter)
     {
-        return aeron_counter_get(aeron_system_counter_addr(resolver->context->system_counters, counter));
+        return aeron_counter_get_plain(aeron_system_counter_addr(resolver->context->system_counters, counter));
     }
 
     static int64_t shortSends(const resolver_fields_t *resolver)
@@ -379,7 +379,7 @@ TEST_F(NameResolverTest, shouldUseStaticLookupTable)
     ASSERT_EQ(0, m_a.resolver.resolve_func(&m_a.resolver, NAME_0, AERON_UDP_CHANNEL_ENDPOINT_KEY, false, addr_ptr));
     ASSERT_EQ(host_0a.s_addr, address.sin_addr.s_addr);
 
-    aeron_counter_set_ordered(name0ToggleAddr, AERON_NAME_RESOLVER_CSV_USE_RE_RESOLUTION_HOST_OP);
+    aeron_counter_set_release(name0ToggleAddr, AERON_NAME_RESOLVER_CSV_USE_RE_RESOLUTION_HOST_OP);
 
     ASSERT_EQ(0, m_a.resolver.resolve_func(&m_a.resolver, NAME_0, AERON_UDP_CHANNEL_ENDPOINT_KEY, true, addr_ptr));
     ASSERT_EQ(host_0b.s_addr, address.sin_addr.s_addr);
@@ -387,7 +387,7 @@ TEST_F(NameResolverTest, shouldUseStaticLookupTable)
     ASSERT_EQ(0, m_a.resolver.resolve_func(&m_a.resolver, NAME_1, AERON_UDP_CHANNEL_ENDPOINT_KEY, false, addr_ptr));
     ASSERT_EQ(host_1a.s_addr, address.sin_addr.s_addr);
 
-    aeron_counter_set_ordered(name1ToggleAddr, AERON_NAME_RESOLVER_CSV_USE_RE_RESOLUTION_HOST_OP);
+    aeron_counter_set_release(name1ToggleAddr, AERON_NAME_RESOLVER_CSV_USE_RE_RESOLUTION_HOST_OP);
 
     ASSERT_EQ(0, m_a.resolver.resolve_func(&m_a.resolver, NAME_1, AERON_UDP_CHANNEL_ENDPOINT_KEY, true, addr_ptr));
     ASSERT_EQ(host_1b.s_addr, address.sin_addr.s_addr);

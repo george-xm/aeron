@@ -21,15 +21,6 @@
 #include "protocol/aeron_udp_protocol.h"
 #include "aeron_atomic.h"
 
-#pragma pack(push)
-#pragma pack(4)
-typedef struct aeron_data_header_as_longs_stct
-{
-    uint64_t hdr[4];
-}
-aeron_data_header_as_longs_t;
-#pragma pack(pop)
-
 inline void aeron_term_rebuilder_insert(uint8_t *dest, const uint8_t *src, size_t length)
 {
     aeron_data_header_t *hdr_dest = (aeron_data_header_t *)dest;

@@ -46,7 +46,8 @@ typedef enum aeron_client_managed_resource_type_en
     AERON_CLIENT_TYPE_IMAGE,
     AERON_CLIENT_TYPE_LOGBUFFER,
     AERON_CLIENT_TYPE_COUNTER,
-    AERON_CLIENT_TYPE_DESTINATION
+    AERON_CLIENT_TYPE_DESTINATION,
+    AERON_CLIENT_TYPE_NEXT_AVAILABLE_SESSION_ID,
 }
 aeron_client_managed_resource_type_t;
 
@@ -68,6 +69,7 @@ typedef struct aeron_client_registering_resource_stct
         aeron_subscription_t *subscription;
         aeron_counter_t *counter;
         aeron_client_command_base_t *base_resource;
+        int32_t next_session_id;
     }
     resource;
 
@@ -220,6 +222,8 @@ typedef struct aeron_client_conductor_stct
     long long time_of_last_service_ns;
     long long time_of_last_keepalive_ns;
 
+    int32_t control_protocol_version;
+
     int64_t client_id;
     const char* client_name;
 
@@ -259,6 +263,7 @@ void aeron_client_conductor_on_cmd_close_publication(void *clientd, void *item);
 
 int aeron_client_conductor_async_add_publication(
     aeron_async_add_publication_t **async, aeron_client_conductor_t *conductor, const char *uri, int32_t stream_id);
+
 int aeron_client_conductor_async_close_publication(
     aeron_client_conductor_t *conductor,
     aeron_publication_t *publication,
@@ -270,6 +275,7 @@ int aeron_client_conductor_async_add_exclusive_publication(
     aeron_client_conductor_t *conductor,
     const char *uri,
     int32_t stream_id);
+
 int aeron_client_conductor_async_close_exclusive_publication(
     aeron_client_conductor_t *conductor,
     aeron_exclusive_publication_t *publication,
@@ -285,6 +291,7 @@ int aeron_client_conductor_async_add_subscription(
     void *on_available_image_clientd,
     aeron_on_unavailable_image_t on_unavailable_image_handler,
     void *on_unavailable_image_clientd);
+
 int aeron_client_conductor_async_close_subscription(
     aeron_client_conductor_t *conductor,
     aeron_subscription_t *subscription,
@@ -299,6 +306,7 @@ int aeron_client_conductor_async_add_counter(
     size_t key_buffer_length,
     const char *label_buffer,
     size_t label_buffer_length);
+
 int aeron_client_conductor_async_close_counter(
     aeron_client_conductor_t *conductor,
     aeron_counter_t *counter,
@@ -363,6 +371,11 @@ int aeron_client_conductor_async_remove_subscription_destination(
     aeron_subscription_t *subscription,
     const char *uri);
 
+int aeron_client_conductor_async_get_next_available_session_id(
+    aeron_async_get_next_available_session_id_t **async,
+    aeron_client_conductor_t *conductor,
+    int32_t stream_id);
+
 int aeron_client_conductor_async_handler(aeron_client_conductor_t *conductor, aeron_client_handler_cmd_t *cmd);
 
 int aeron_client_conductor_on_error(aeron_client_conductor_t *conductor, aeron_error_response_t *response);
@@ -385,6 +398,7 @@ int aeron_client_conductor_on_unavailable_counter(
     aeron_client_conductor_t *conductor, aeron_counter_update_t *response);
 
 int aeron_client_conductor_on_static_counter(aeron_client_conductor_t *conductor, aeron_static_counter_response_t *response);
+int aeron_client_conductor_on_next_available_session_id(aeron_client_conductor_t *conductor, aeron_next_available_session_id_response_t *response);
 
 int aeron_client_conductor_on_client_timeout(aeron_client_conductor_t *conductor, aeron_client_timeout_t *response);
 int aeron_client_conductor_on_error_frame(aeron_client_conductor_t *conductor, aeron_publication_error_t *response);
@@ -399,8 +413,14 @@ int aeron_client_conductor_release_log_buffer(aeron_client_conductor_t *conducto
 
 int aeron_client_conductor_linger_image(aeron_client_conductor_t *conductor, aeron_image_t *image);
 
-int aeron_client_conductor_offer_remove_command(
-    aeron_client_conductor_t *conductor, int64_t registration_id, int32_t command_type);
+int aeron_client_conductor_offer_remove_counter_command(
+    aeron_client_conductor_t *conductor, int64_t registration_id);
+
+int aeron_client_conductor_offer_remove_publication_command(
+    aeron_client_conductor_t *conductor, int64_t registration_id, bool revoke);
+
+int aeron_client_conductor_offer_remove_subscription_command(
+    aeron_client_conductor_t *conductor, int64_t registration_id);
 
 int aeron_client_conductor_offer_destination_command(
     aeron_client_conductor_t *conductor,
@@ -415,6 +435,8 @@ int aeron_client_conductor_reject_image(
     int64_t position,
     const char *reason,
     int32_t command_type);
+
+int aeron_client_conductor_on_cmd_client_close(aeron_client_conductor_t *conductor);
 
 inline int aeron_counter_heartbeat_timestamp_find_counter_id_by_registration_id(
     aeron_counters_reader_t *counters_reader, int32_t type_id, int64_t registration_id)

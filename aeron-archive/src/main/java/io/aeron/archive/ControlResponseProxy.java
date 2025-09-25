@@ -48,6 +48,7 @@ class ControlResponseProxy
         new RecordingSubscriptionDescriptorEncoder();
     private final RecordingSignalEventEncoder recordingSignalEventEncoder = new RecordingSignalEventEncoder();
     private final ChallengeEncoder challengeEncoder = new ChallengeEncoder();
+    private final PingEncoder pingEncoder = new PingEncoder();
 
     boolean sendDescriptor(
         final long controlSessionId,
@@ -196,6 +197,29 @@ class ControlResponseProxy
         return false;
     }
 
+    public boolean sendPing(final long controlSessionId, final Publication controlPublication)
+    {
+        final int length = MESSAGE_HEADER_LENGTH + PingEncoder.BLOCK_LENGTH;
+
+        int attempts = SEND_ATTEMPTS;
+        do
+        {
+            final long result = controlPublication.tryClaim(length, bufferClaim);
+            if (result > 0)
+            {
+                final MutableDirectBuffer buffer = bufferClaim.buffer();
+                final int offset = bufferClaim.offset();
+                pingEncoder.wrapAndApplyHeader(buffer, offset, messageHeaderEncoder)
+                    .controlSessionId(controlSessionId);
+                bufferClaim.commit();
+                return true;
+            }
+        }
+        while (--attempts > 0);
+
+        return false;
+    }
+
     private boolean send(final ControlSession session, final DirectBuffer buffer, final int length)
     {
         int attempts = SEND_ATTEMPTS;
@@ -218,20 +242,21 @@ class ControlResponseProxy
     {
         if (result == Publication.NOT_CONNECTED)
         {
-            session.abort("response publication is not connected");
-            throw new ArchiveEvent("response publication is not connected: " + session);
+            session.abort(ControlSession.RESPONSE_NOT_CONNECTED_MSG);
+            throw new ArchiveEvent(ControlSession.RESPONSE_NOT_CONNECTED_MSG + ": " + session);
         }
 
         if (result == Publication.CLOSED)
         {
-            session.abort("response publication is closed");
+            session.abort("control response publication is closed");
             throw new ArchiveEvent("response publication is closed: " + session, AeronException.Category.ERROR);
         }
 
         if (result == Publication.MAX_POSITION_EXCEEDED)
         {
-            session.abort("response publication at max position");
-            throw new ArchiveEvent("response publication at max position: " + session, AeronException.Category.ERROR);
+            session.abort("control response publication is at max position");
+            throw new ArchiveEvent(
+                "response publication is at max position: " + session, AeronException.Category.ERROR);
         }
     }
 

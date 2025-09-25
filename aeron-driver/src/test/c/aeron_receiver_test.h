@@ -100,6 +100,8 @@ protected:
             &m_error_log, m_error_log_buffer.data(), m_error_log_buffer.size(), aeron_epoch_clock);
         aeron_driver_receiver_init(&m_receiver, m_context, &m_system_counters, &m_error_log);
 
+        aeron_loss_reporter_init(&m_loss_reporter, m_loss_reporter_buffer.data(), m_loss_reporter_buffer.size());
+
         m_receiver_proxy.receiver = &m_receiver;
         m_context->receiver_proxy = &m_receiver_proxy;
         m_context->error_log = &m_error_log;
@@ -203,12 +205,16 @@ protected:
         // Counters are copied...
         aeron_position_t hwm_position;
         aeron_position_t pos_position;
+        aeron_atomic_counter_t rcv_naks_sent;
         pos_position.counter_id = aeron_counter_publisher_position_allocate(
             &m_counters_manager, 0, session_id, stream_id, strlen("foo"), "foo");
         pos_position.value_addr = aeron_counters_manager_addr(&m_counters_manager, pos_position.counter_id);
         hwm_position.counter_id = aeron_counter_publisher_position_allocate(
             &m_counters_manager, 0, session_id, stream_id, strlen("foo"), "foo");
         hwm_position.value_addr = aeron_counters_manager_addr(&m_counters_manager, hwm_position.counter_id);
+        rcv_naks_sent.counter_id = aeron_counter_receiver_naks_sent_allocate(
+                &m_counters_manager, 0, session_id, stream_id, strlen("foo"), "foo");
+        rcv_naks_sent.value_addr = aeron_counters_manager_addr(&m_counters_manager, rcv_naks_sent.counter_id);
 
         aeron_udp_channel_t *channel = endpoint->conductor_fields.udp_channel;
         m_context->congestion_control_supplier_func(
@@ -226,10 +232,30 @@ protected:
         conductor.context = m_context;
 
         if (aeron_publication_image_create(
-            &image, endpoint, destination, &conductor, correlation_id, session_id, stream_id, 0, 0, 0,
-            &hwm_position, &pos_position, congestion_control_strategy,
-            &channel->remote_control, &channel->local_data,
-            TERM_BUFFER_SIZE, MTU, UINT8_C(0), nullptr, true, true, false, &m_system_counters) < 0)
+            &image,
+            endpoint,
+            destination,
+            &conductor,
+            correlation_id,
+            session_id,
+            stream_id,
+            0,
+            0,
+            0,
+            &hwm_position,
+            &pos_position,
+            &rcv_naks_sent,
+            congestion_control_strategy,
+            &channel->remote_control,
+            &channel->local_data,
+            TERM_BUFFER_SIZE,
+            MTU,
+            UINT8_C(0),
+            &m_loss_reporter,
+            true,
+            true,
+            false,
+            &m_system_counters) < 0)
         {
             congestion_control_strategy->fini(congestion_control_strategy);
             return nullptr;
@@ -281,6 +307,8 @@ protected:
     int64_t m_conductor_fail_counter = 0;
     aeron_driver_receiver_t m_receiver = {};
     aeron_distinct_error_log_t m_error_log = {};
+    aeron_loss_reporter_t m_loss_reporter = {};
+    AERON_DECL_ALIGNED(buffer_t m_loss_reporter_buffer, 16) = {};
     AERON_DECL_ALIGNED(buffer_t m_error_log_buffer, 16) = {};
     AERON_DECL_ALIGNED(buffer_t m_counter_value_buffer, 16) = {};
     AERON_DECL_ALIGNED(buffer_4x_t m_counter_meta_buffer, 16) = {};

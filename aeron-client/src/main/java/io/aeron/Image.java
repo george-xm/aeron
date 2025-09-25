@@ -52,14 +52,16 @@ public final class Image
 {
     private final long correlationId;
     private final long joinPosition;
-    private long finalPosition;
     private final int sessionId;
     private final int initialTermId;
     private final int termLengthMask;
     private final int positionBitsToShift;
+    private final int mtu;
 
+    private long finalPosition;
     private long eosPosition = Long.MAX_VALUE;
     private boolean isEos;
+    private boolean isRevoked;
     private volatile boolean isClosed;
 
     private final Position subscriberPosition;
@@ -102,9 +104,10 @@ public final class Image
         termBuffers = logBuffers.duplicateTermBuffers();
 
         final int termLength = logBuffers.termLength();
-        this.termLengthMask = termLength - 1;
-        this.positionBitsToShift = LogBufferDescriptor.positionBitsToShift(termLength);
-        this.initialTermId = LogBufferDescriptor.initialTermId(logBuffers.metaDataBuffer());
+        termLengthMask = termLength - 1;
+        positionBitsToShift = LogBufferDescriptor.positionBitsToShift(termLength);
+        initialTermId = LogBufferDescriptor.initialTermId(logBuffers.metaDataBuffer());
+        mtu = LogBufferDescriptor.mtuLength(logBuffers.metaDataBuffer());
         header = new Header(initialTermId, positionBitsToShift, this);
     }
 
@@ -156,7 +159,7 @@ public final class Image
      */
     public int mtuLength()
     {
-        return LogBufferDescriptor.mtuLength(logBuffers.metaDataBuffer());
+        return mtu;
     }
 
     /**
@@ -234,7 +237,7 @@ public final class Image
         if (!isClosed)
         {
             validatePosition(newPosition);
-            subscriberPosition.setOrdered(newPosition);
+            subscriberPosition.setRelease(newPosition);
         }
     }
 
@@ -295,6 +298,21 @@ public final class Image
         }
 
         return LogBufferDescriptor.activeTransportCount(logBuffers.metaDataBuffer());
+    }
+
+    /**
+     * Has the associated publication been revoked?
+     *
+     * @return true if the associated publication was revoked otherwise false.
+     */
+    public boolean isPublicationRevoked()
+    {
+        if (isClosed)
+        {
+            return isRevoked;
+        }
+
+        return LogBufferDescriptor.isPublicationRevoked(logBuffers.metaDataBuffer());
     }
 
     /**
@@ -364,9 +382,9 @@ public final class Image
         finally
         {
             final long newPosition = initialPosition + (offset - initialOffset);
-            if (newPosition > initialPosition)
+            if (newPosition > initialPosition && !isClosed)
             {
-                subscriberPosition.setOrdered(newPosition);
+                subscriberPosition.setRelease(newPosition);
             }
         }
 
@@ -442,7 +460,10 @@ public final class Image
                 {
                     initialPosition += (offset - initialOffset);
                     initialOffset = offset;
-                    subscriberPosition.setOrdered(initialPosition);
+                    if (!isClosed)
+                    {
+                        subscriberPosition.setRelease(initialPosition);
+                    }
                 }
             }
         }
@@ -453,9 +474,9 @@ public final class Image
         finally
         {
             final long resultingPosition = initialPosition + (offset - initialOffset);
-            if (resultingPosition > initialPosition)
+            if (resultingPosition > initialPosition && !isClosed)
             {
-                subscriberPosition.setOrdered(resultingPosition);
+                subscriberPosition.setRelease(resultingPosition);
             }
         }
 
@@ -528,9 +549,9 @@ public final class Image
         finally
         {
             final long resultingPosition = initialPosition + (offset - initialOffset);
-            if (resultingPosition > initialPosition)
+            if (resultingPosition > initialPosition && !isClosed)
             {
-                subscriberPosition.setOrdered(resultingPosition);
+                subscriberPosition.setRelease(resultingPosition);
             }
         }
 
@@ -615,7 +636,10 @@ public final class Image
                 {
                     initialPosition += (offset - initialOffset);
                     initialOffset = offset;
-                    subscriberPosition.setOrdered(initialPosition);
+                    if (!isClosed)
+                    {
+                        subscriberPosition.setRelease(initialPosition);
+                    }
                 }
             }
         }
@@ -626,9 +650,9 @@ public final class Image
         finally
         {
             final long resultingPosition = initialPosition + (offset - initialOffset);
-            if (resultingPosition > initialPosition)
+            if (resultingPosition > initialPosition && !isClosed)
             {
-                subscriberPosition.setOrdered(resultingPosition);
+                subscriberPosition.setRelease(resultingPosition);
             }
         }
 
@@ -768,7 +792,10 @@ public final class Image
             }
             finally
             {
-                subscriberPosition.setOrdered(position + length);
+                if (!isClosed)
+                {
+                    subscriberPosition.setRelease(position + length);
+                }
             }
         }
 
@@ -823,14 +850,22 @@ public final class Image
             }
             finally
             {
-                subscriberPosition.setOrdered(position + length);
+                if (!isClosed)
+                {
+                    subscriberPosition.setRelease(position + length);
+                }
             }
         }
 
         return length;
     }
 
-    void reject(final String reason)
+    /**
+     * Reject this image.
+     *
+     * @param reason a String indicating the reason why this image is being rejected.
+     */
+    public void reject(final String reason)
     {
         subscription.rejectImage(correlationId, position(), reason);
     }
@@ -866,6 +901,7 @@ public final class Image
         finalPosition = subscriberPosition.getVolatile();
         eosPosition = LogBufferDescriptor.endOfStreamPosition(logBuffers.metaDataBuffer());
         isEos = finalPosition >= eosPosition;
+        isRevoked = LogBufferDescriptor.isPublicationRevoked(logBuffers.metaDataBuffer());
         isClosed = true;
     }
 

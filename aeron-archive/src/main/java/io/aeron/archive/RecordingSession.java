@@ -28,6 +28,7 @@ import static io.aeron.archive.client.AeronArchive.NULL_POSITION;
  */
 class RecordingSession implements Session
 {
+    @SuppressWarnings("JavadocVariable")
     enum State
     {
         INIT, RECORDING, INACTIVE, STOPPED
@@ -47,7 +48,8 @@ class RecordingSession implements Session
     private final ControlSession controlSession;
     private final CountedErrorHandler countedErrorHandler;
     private State state = State.INIT;
-    private String errorMessage = null;
+    private String errorMessage;
+    private String abortReason;
     private int errorCode = ArchiveException.GENERIC;
 
     RecordingSession(
@@ -100,6 +102,7 @@ class RecordingSession implements Session
      */
     public void abort(final String reason)
     {
+        abortReason = reason;
         isAborted = true;
     }
 
@@ -121,7 +124,7 @@ class RecordingSession implements Session
 
         if (isAborted)
         {
-            state = State.INACTIVE;
+            state(State.INACTIVE, abortReason);
         }
 
         if (State.INIT == state)
@@ -233,12 +236,13 @@ class RecordingSession implements Session
             final int workCount = image.blockPoll(recordingWriter, blockLengthLimit);
             if (workCount > 0)
             {
-                this.position.setOrdered(recordingWriter.position());
+                this.position.setRelease(recordingWriter.position());
             }
             else if (image.isEndOfStream() || image.isClosed())
             {
-                state(State.INACTIVE, "image.isEndOfStream=" + image.isEndOfStream() +
-                    ", image.isClosed=" + image.isClosed());
+                state(
+                    State.INACTIVE,
+                    "image.isEndOfStream=" + image.isEndOfStream() + ", image.isClosed=" + image.isClosed());
             }
 
             if (null != recordingEventsProxy)

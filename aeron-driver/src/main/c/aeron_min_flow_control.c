@@ -72,6 +72,7 @@ typedef struct aeron_min_flow_control_strategy_state_stct
         aeron_driver_flow_control_strategy_on_receiver_change_func_t receiver_removed;
     } log;
     aeron_position_t receivers_counter;
+    size_t retransmit_receiver_window_multiple;
 }
 aeron_min_flow_control_strategy_state_t;
 
@@ -141,8 +142,8 @@ int64_t aeron_min_flow_control_strategy_on_idle(
         strategy_state->receivers.length = receiver_count;
         bool has_required_receivers = receiver_count >= (size_t)strategy_state->group_min_size;
         AERON_SET_RELEASE(strategy_state->has_required_receivers, has_required_receivers);
-        aeron_counter_set_ordered(
-            strategy_state->receivers_counter.value_addr, (int64_t)strategy_state->receivers.length);
+        aeron_counter_set_release(
+            strategy_state->receivers_counter.value_addr, (int64_t) strategy_state->receivers.length);
     }
 
     return strategy_state->receivers.length < (size_t)strategy_state->group_min_size ||
@@ -231,8 +232,8 @@ int64_t aeron_min_flow_control_strategy_process_sm(
                     strategy_state->receivers.length);
             }
 
-            aeron_counter_set_ordered(
-                strategy_state->receivers_counter.value_addr, (int64_t)strategy_state->receivers.length);
+            aeron_counter_set_release(
+                strategy_state->receivers_counter.value_addr, (int64_t) strategy_state->receivers.length);
         }
     }
 
@@ -421,11 +422,13 @@ size_t aeron_min_flow_control_strategy_max_retransmission_length(
     size_t term_buffer_length,
     size_t mtu_length)
 {
+    aeron_min_flow_control_strategy_state_t *strategy_state = (aeron_min_flow_control_strategy_state_t *)state;
+
     return aeron_flow_control_calculate_retransmission_length(
         resend_length,
         term_buffer_length,
         term_offset,
-        AERON_MIN_FLOW_CONTROL_RETRANSMIT_RECEIVER_WINDOW_MULTIPLE);
+        strategy_state->retransmit_receiver_window_multiple);
 }
 
 void aeron_min_flow_control_strategy_on_trigger_send_setup(
@@ -497,7 +500,7 @@ int aeron_tagged_flow_control_strategy_allocate_receiver_counter(
 
     strategy_state->receivers_counter.counter_id = counter_id;
     strategy_state->receivers_counter.value_addr = aeron_counters_manager_addr(counters_manager, counter_id);
-    aeron_counter_set_ordered(strategy_state->receivers_counter.value_addr, 0);
+    aeron_counter_set_release(strategy_state->receivers_counter.value_addr, 0);
 
     return 0;
 }
@@ -517,15 +520,24 @@ int aeron_tagged_flow_control_strategy_supplier_init(
     aeron_flow_control_strategy_t *_strategy;
     aeron_flow_control_tagged_options_t options;
 
+    options.multicast_flow_control_rrwm = context->multicast_flow_control_rrwm;
     const char *fc_options = aeron_uri_find_param_value(&channel->uri.params.udp.additional_params, AERON_URI_FC_KEY);
     if (aeron_flow_control_parse_tagged_options(NULL != fc_options ? strlen(fc_options) : 0, fc_options, &options) < 0)
     {
+        AERON_APPEND_ERR("%s", "");
         return -1;
     }
 
-    if (aeron_alloc((void **)&_strategy, sizeof(aeron_flow_control_strategy_t)) < 0 ||
-        aeron_alloc(&_strategy->state, sizeof(aeron_min_flow_control_strategy_state_t)) < 0)
+    if (aeron_alloc((void**)&_strategy, sizeof(aeron_flow_control_strategy_t)) < 0)
     {
+        AERON_APPEND_ERR("%s", "");
+        return -1;
+    }
+
+    if (aeron_alloc(&_strategy->state, sizeof(aeron_min_flow_control_strategy_state_t)) < 0)
+    {
+        aeron_free(_strategy);
+        AERON_APPEND_ERR("%s", "");
         return -1;
     }
 
@@ -576,7 +588,7 @@ int aeron_tagged_flow_control_strategy_supplier_init(
 
     bool has_required_receivers = state->receivers.length >= (size_t)state->group_min_size;
     AERON_SET_RELEASE(state->has_required_receivers, has_required_receivers);
-
+    state->retransmit_receiver_window_multiple = options.multicast_flow_control_rrwm;
     *strategy = _strategy;
 
     return 0;

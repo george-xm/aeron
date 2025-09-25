@@ -21,10 +21,19 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
 import static io.aeron.archive.client.AeronArchive.NULL_POSITION;
-import static io.aeron.cluster.ClusterMember.*;
+import static io.aeron.cluster.ClusterMember.compareLog;
+import static io.aeron.cluster.ClusterMember.isQuorumCandidate;
+import static io.aeron.cluster.ClusterMember.isQuorumLeader;
+import static io.aeron.cluster.ClusterMember.isUnanimousCandidate;
+import static io.aeron.cluster.ClusterMember.isUnanimousLeader;
+import static io.aeron.cluster.ClusterMember.quorumPosition;
+import static io.aeron.cluster.ClusterMember.quorumThreshold;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ClusterMemberTest
 {
@@ -113,33 +122,34 @@ class ClusterMemberTest
         assertThat(quorumPosition(members, rankedPositions), is(0L));
     }
 
-    @Test
-    void shouldDetermineQuorumPosition()
+    @ParameterizedTest
+    @CsvSource({
+        "0,0,0,0",
+        "123,0,0,0",
+        "123,123,0,123",
+        "123,123,123,123",
+        "0,123,123,123",
+        "0,0,123,0",
+        "0,123,200,123",
+        "5,3,1,3",
+        "5,1,3,3",
+        "1,3,5,3",
+        "1,5,3,3",
+        "3,1,5,3",
+        "3,5,1,3"
+    })
+    void shouldDetermineQuorumPosition(
+        final long member0LogPosition,
+        final long member1LogPosition,
+        final long member2LogPosition,
+        final long expectedQuorumPosition)
     {
-        final long[][] positions = new long[][]
-        {
-            { 0, 0, 0 },
-            { 123, 0, 0 },
-            { 123, 123, 0 },
-            { 123, 123, 123 },
-            { 0, 123, 123 },
-            { 0, 0, 123 },
-            { 0, 123, 200 },
-        };
+        members[0].logPosition(member0LogPosition);
+        members[1].logPosition(member1LogPosition);
+        members[2].logPosition(member2LogPosition);
 
-        final long[] quorumPositions = new long[]{ 0, 0, 123, 123, 123, 0, 123 };
-
-        for (int i = 0, length = positions.length; i < length; i++)
-        {
-            final long[] memberPositions = positions[i];
-            for (int j = 0; j < memberPositions.length; j++)
-            {
-                members[j].logPosition(memberPositions[j]);
-            }
-
-            final long quorumPosition = quorumPosition(members, rankedPositions);
-            assertThat("Test: " + i, quorumPosition, is(quorumPositions[i]));
-        }
+        final long quorumPosition = quorumPosition(members, rankedPositions);
+        assertEquals(expectedQuorumPosition, quorumPosition);
     }
 
     @Test

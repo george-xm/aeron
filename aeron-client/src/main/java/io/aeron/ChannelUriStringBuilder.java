@@ -54,6 +54,7 @@ public final class ChannelUriStringBuilder
     private String mediaReceiveTimestampOffset;
     private String channelReceiveTimestampOffset;
     private String channelSendTimestampOffset;
+    private String responseCorrelationId;
     private String responseEndpoint;
     private Boolean reliable;
     private Boolean sparse;
@@ -77,9 +78,9 @@ public final class ChannelUriStringBuilder
     private Long sessionId;
     private Long groupTag;
     private Long linger;
-    private Long responseCorrelationId;
     private Long nakDelay;
     private Long untetheredWindowLimitTimeoutNs;
+    private Long untetheredLingerTimeoutNs;
     private Long untetheredRestingTimeoutNs;
     private boolean isSessionIdTagged;
 
@@ -146,6 +147,7 @@ public final class ChannelUriStringBuilder
         responseCorrelationId(channelUri);
         nakDelay(channelUri);
         untetheredWindowLimitTimeout(channelUri);
+        untetheredLingerTimeout(channelUri);
         untetheredRestingTimeout(channelUri);
         maxResend(channelUri);
         streamId(channelUri);
@@ -2004,6 +2006,18 @@ public final class ChannelUriStringBuilder
     }
 
     /**
+     * Get the correlation id from the image received on the response "server's" subscription to be used by a response
+     * publication.
+     *
+     * @return correlation id of an image from the response "server's" subscription.
+     * @see CommonContext#RESPONSE_CORRELATION_ID_PARAM_NAME
+     */
+    public String responseCorrelationId()
+    {
+        return responseCorrelationId;
+    }
+
+    /**
      * Set the correlation id from the image received on the response "server's" subscription to be used by a response
      * publication.
      *
@@ -2013,6 +2027,37 @@ public final class ChannelUriStringBuilder
      */
     public ChannelUriStringBuilder responseCorrelationId(final Long responseCorrelationId)
     {
+        this.responseCorrelationId = Long.toString(responseCorrelationId);
+        return this;
+    }
+
+    /**
+     * Set the correlation id from the image received on the response "server's" subscription to be used by a response
+     * publication.
+     *
+     * @param responseCorrelationId correlation id of an image from the response "server's" subscription.
+     * @return this for a fluent API.
+     * @see CommonContext#RESPONSE_CORRELATION_ID_PARAM_NAME
+     */
+    public ChannelUriStringBuilder responseCorrelationId(final String responseCorrelationId)
+    {
+        if (null != responseCorrelationId && !PROTOTYPE_CORRELATION_ID.equals(responseCorrelationId))
+        {
+            try
+            {
+                if (Long.parseLong(responseCorrelationId) < -1)
+                {
+                    throw new NumberFormatException("responseCorrelationId must be positive");
+                }
+            }
+            catch (final NumberFormatException ex)
+            {
+                throw new IllegalArgumentException(
+                    "responseCorrelationId must be a number greater than or equal to -1, or the value '" +
+                        PROTOTYPE_CORRELATION_ID + "' found: " + responseCorrelationId);
+            }
+        }
+
         this.responseCorrelationId = responseCorrelationId;
         return this;
     }
@@ -2031,14 +2076,7 @@ public final class ChannelUriStringBuilder
 
         if (null != responseCorrelationIdString)
         {
-            try
-            {
-                responseCorrelationId(Long.valueOf(responseCorrelationIdString));
-            }
-            catch (final NumberFormatException ex)
-            {
-                throw new IllegalArgumentException("'response-correlation-id' must be a valid long value", ex);
-            }
+            responseCorrelationId(responseCorrelationIdString);
         }
 
         return this;
@@ -2133,6 +2171,57 @@ public final class ChannelUriStringBuilder
     public Long untetheredWindowLimitTimeoutNs()
     {
         return untetheredWindowLimitTimeoutNs;
+    }
+
+    /**
+     * The time for an untethered subscription to linger.
+     *
+     * @param timeout specified either in nanoseconds or using a units suffix, e.g. 1ms, 1us.
+     * @return this for a fluent API.
+     * @see CommonContext#UNTETHERED_LINGER_TIMEOUT_PARAM_NAME
+     */
+    public ChannelUriStringBuilder untetheredLingerTimeout(final String timeout)
+    {
+        this.untetheredLingerTimeoutNs = null != timeout ?
+            parseDuration(UNTETHERED_LINGER_TIMEOUT_PARAM_NAME, timeout) : null;
+        return this;
+    }
+
+    /**
+     * The time for an untethered subscription to linger.
+     *
+     * @param timeout specified either in nanoseconds.
+     * @return this for a fluent API.
+     * @see CommonContext#UNTETHERED_LINGER_TIMEOUT_PARAM_NAME
+     */
+    public ChannelUriStringBuilder untetheredLingerTimeoutNs(final Long timeout)
+    {
+        this.untetheredLingerTimeoutNs = timeout;
+        return this;
+    }
+
+    /**
+     * The time for an untethered subscription to linger.
+     *
+     * @param channelUri the existing URI to extract the untetheredLingerTimeout from.
+     * @return this for a fluent API.
+     * @see CommonContext#UNTETHERED_LINGER_TIMEOUT_PARAM_NAME
+     */
+    public ChannelUriStringBuilder untetheredLingerTimeout(final ChannelUri channelUri)
+    {
+        this.untetheredLingerTimeout(channelUri.get(UNTETHERED_LINGER_TIMEOUT_PARAM_NAME));
+        return this;
+    }
+
+    /**
+     * The time for an untethered subscription to linger.
+     *
+     * @return the timeout in ns.
+     * @see CommonContext#UNTETHERED_LINGER_TIMEOUT_PARAM_NAME
+     */
+    public Long untetheredLingerTimeoutNs()
+    {
+        return untetheredLingerTimeoutNs;
     }
 
     /**
@@ -2401,6 +2490,7 @@ public final class ChannelUriStringBuilder
         appendParameter(sb, RESPONSE_CORRELATION_ID_PARAM_NAME, responseCorrelationId);
         appendParameter(sb, NAK_DELAY_PARAM_NAME, nakDelay);
         appendParameter(sb, UNTETHERED_WINDOW_LIMIT_TIMEOUT_PARAM_NAME, untetheredWindowLimitTimeoutNs);
+        appendParameter(sb, UNTETHERED_LINGER_TIMEOUT_PARAM_NAME, untetheredLingerTimeoutNs);
         appendParameter(sb, UNTETHERED_RESTING_TIMEOUT_PARAM_NAME, untetheredRestingTimeoutNs);
         appendParameter(sb, MAX_RESEND_PARAM_NAME, maxResend);
         appendParameter(sb, STREAM_ID_PARAM_NAME, streamId);

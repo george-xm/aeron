@@ -23,8 +23,6 @@
 :source-highlighter: prettify
 :autofit-option:
 
-IMPORTANT: This tutorial is currently a work in progress, information may be missing or incomplete.
-
 This tutorial assumes that the user already has a basic working knowledge of Aeron Messaging.
 
 == Introduction
@@ -132,7 +130,7 @@ code, use the appropriate release version and build the projects.
 
 [subs = "attributes+"]
 ----
-> git clone https://github.com/real-logic/aeron.git
+> git clone https://github.com/aeron-io/aeron.git
 > cd aeron
 > git checkout -b my_tutorial {aeronVersion}
 > ./gradlew
@@ -346,8 +344,6 @@ files for each service component, and the recording log used to track snapshots 
 this location is likely to be fairly important as you will want to map this to a fast disk in order to get the best
 performance out the system.
 
-<4> Create a shutdown barrier that will be used to trap exit signals and allow the service to exit cleanly.
-
 === Configuration
 
 ==== Media Driver
@@ -456,12 +452,13 @@ Now we have a configured cluster, we can start it running. The code for launchin
 ----
 include::{sampleSourceDir}/io/aeron/samples/cluster/tutorial/BasicAuctionClusteredServiceNode.java[tag=running]
 ----
+<1> Create a shutdown barrier that will be used to trap exit signals and allow the service to exit cleanly.
 
-<1> Launches a `ClusteredMediaDriver` that includes instances of the Media Driver, Archive and Consensus Module.
+<2> Launches a `ClusteredMediaDriver` that includes instances of the Media Driver, Archive and Consensus Module.
 
-<2> Immediately afterward we launch a `ClusteredServiceContainer` which is our application.
+<3> Immediately afterward we launch a `ClusteredServiceContainer` which is our application.
 
-<3> Use the shutdown barrier to await a signal to shut down (e.g. using `SIG_TERM` or `SIG_INT` on Unix).
+<4> Use the shutdown barrier to await a signal to shut down (e.g. using `SIG_TERM` or `SIG_INT` on Unix).
 
 There is a script provide to launch the cluster. Assuming you've followed the <<usingthesource>> step above you
 should be able to do the following:

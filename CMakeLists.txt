@@ -13,14 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-cmake_minimum_required(VERSION 3.26 FATAL_ERROR)
-cmake_policy(VERSION 3.26)
-if(COMMAND cmake_policy)
-    cmake_policy(SET CMP0003 NEW)
-endif(COMMAND cmake_policy)
-if(POLICY CMP0135)
-    cmake_policy(SET CMP0135 NEW)
-endif()
+cmake_minimum_required(VERSION 3.30 FATAL_ERROR)
+cmake_policy(VERSION 3.30)
+cmake_policy(SET CMP0003 NEW)
+cmake_policy(SET CMP0135 NEW)
 
 if (${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_BINARY_DIR})
     message(FATAL_ERROR "In-source builds not allowed. Please make a new directory (called a build directory)"
@@ -139,6 +135,9 @@ if (UNIX)
 
     if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER "11.0")
         add_compile_options(-Wno-error=maybe-uninitialized)
+    elseif (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER "21.0")
+        # See gtest: https://github.com/google/googletest/issues/4762
+        add_compile_options(-Wno-error=character-conversion)
     endif ()
 
     if (C_WARNINGS_AS_ERRORS)
@@ -150,8 +149,10 @@ if (UNIX)
     endif (CXX_WARNINGS_AS_ERRORS)
 
     if (SANITISE_BUILD)
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -fsanitize-address-use-after-scope -fsanitize=leak -fsanitize=undefined -DAERON_SANITIZE_ENABLED")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -fsanitize-address-use-after-scope -fsanitize=leak -fsanitize=undefined -DAERON_SANITIZE_ENABLED")
+        if (NOT DEFINED APPLE)
+            set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -fsanitize-address-use-after-scope -fsanitize=leak -fsanitize=undefined -DAERON_SANITIZE_ENABLED")
+            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -fsanitize-address-use-after-scope -fsanitize=leak -fsanitize=undefined -DAERON_SANITIZE_ENABLED")
+        endif ()
     endif (SANITISE_BUILD)
 
     if (COVERAGE_BUILD)
@@ -163,8 +164,12 @@ endif ()
 # platform specific flags
 if (APPLE)
     add_compile_options(-Wsign-compare)
-    add_definitions(-DDarwin)
     add_compile_options(-Wno-deprecated-register)
+
+    if (SANITISE_BUILD)
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -fsanitize-address-use-after-scope -fsanitize=undefined -DAERON_SANITIZE_ENABLED")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -fsanitize-address-use-after-scope -fsanitize=undefined -DAERON_SANITIZE_ENABLED")
+    endif (SANITISE_BUILD)
 elseif (CYGWIN)
     add_definitions(-DWIN32)
     if (AERON_TESTS)
@@ -294,15 +299,10 @@ if (AERON_BUILD_SAMPLES)
     set(HDR_HISTOGRAM_BUILD_PROGRAMS "OFF" CACHE INTERNAL "Set build programs option")
     FetchContent_Declare(
         hdr_histogram
-        URL ${CMAKE_CURRENT_SOURCE_DIR}/cppbuild/HdrHistogram_c-0.11.8.zip
-        URL_MD5 e993a4a08ad084ea0a895e7b2502de99)
+        URL ${CMAKE_CURRENT_SOURCE_DIR}/cppbuild/HdrHistogram_c-0.11.9.zip
+        URL_MD5 dce4d27b89ea0f73cc74be505dc957e3)
 
-    FetchContent_GetProperties(hdr_histogram)
-    if(NOT hdr_histogram_POPULATED)
-        FetchContent_Populate(hdr_histogram)
-        add_subdirectory(${hdr_histogram_SOURCE_DIR} ${hdr_histogram_BINARY_DIR} EXCLUDE_FROM_ALL)
-    endif()
-#    FetchContent_MakeAvailable(hdr_histogram)
+    FetchContent_MakeAvailable(hdr_histogram)
 endif ()
 
 add_subdirectory(${AERON_CLIENT_SOURCE_PATH})

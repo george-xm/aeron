@@ -52,10 +52,10 @@ inline void aeron_duty_cycle_stall_tracker_measure_and_update(void *state, int64
     aeron_duty_cycle_stall_tracker_t *tracker = (aeron_duty_cycle_stall_tracker_t *)state;
     int64_t cycle_time_ns = now_ns - tracker->last_time_of_update_ns;
 
-    aeron_counter_propose_max_ordered(tracker->max_cycle_time_counter, cycle_time_ns);
+    aeron_counter_propose_max_release(tracker->max_cycle_time_counter, cycle_time_ns);
     if (cycle_time_ns > (int64_t)(tracker->cycle_threshold_ns))
     {
-        aeron_counter_ordered_increment(tracker->cycle_time_threshold_exceeded_counter, 1);
+        aeron_counter_increment_release(tracker->cycle_time_threshold_exceeded_counter);
     }
 
     tracker->last_time_of_update_ns = now_ns;

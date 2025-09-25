@@ -15,7 +15,13 @@
  */
 package io.aeron.cluster;
 
-import io.aeron.*;
+import io.aeron.Aeron;
+import io.aeron.AeronCounters;
+import io.aeron.ChannelUri;
+import io.aeron.CommonContext;
+import io.aeron.Counter;
+import io.aeron.RethrowingErrorHandler;
+import io.aeron.Subscription;
 import io.aeron.archive.Archive;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.cluster.client.AeronCluster;
@@ -27,12 +33,11 @@ import io.aeron.cluster.codecs.HeartbeatRequestDecoder;
 import io.aeron.cluster.codecs.MessageHeaderDecoder;
 import io.aeron.cluster.codecs.StandbySnapshotDecoder;
 import io.aeron.cluster.codecs.mark.ClusterComponentType;
-import io.aeron.cluster.service.ClusterMarkFile;
-import io.aeron.cluster.service.ClusterCounters;
-import io.aeron.cluster.service.ClusteredServiceContainer;
 import io.aeron.cluster.service.ClusterClock;
+import io.aeron.cluster.service.ClusterCounters;
+import io.aeron.cluster.service.ClusterMarkFile;
+import io.aeron.cluster.service.ClusteredServiceContainer;
 import io.aeron.cluster.service.SnapshotDurationTracker;
-
 import io.aeron.config.Config;
 import io.aeron.config.DefaultType;
 import io.aeron.driver.DutyCycleTracker;
@@ -46,8 +51,25 @@ import io.aeron.security.AuthorisationService;
 import io.aeron.security.AuthorisationServiceSupplier;
 import io.aeron.security.DefaultAuthenticatorSupplier;
 import io.aeron.version.Versioned;
-import org.agrona.*;
-import org.agrona.concurrent.*;
+import org.agrona.CloseHelper;
+import org.agrona.ErrorHandler;
+import org.agrona.ExpandableArrayBuffer;
+import org.agrona.IoUtil;
+import org.agrona.LangUtil;
+import org.agrona.MarkFile;
+import org.agrona.SemanticVersion;
+import org.agrona.Strings;
+import org.agrona.SystemUtil;
+import org.agrona.concurrent.Agent;
+import org.agrona.concurrent.AgentInvoker;
+import org.agrona.concurrent.AgentRunner;
+import org.agrona.concurrent.CountedErrorHandler;
+import org.agrona.concurrent.EpochClock;
+import org.agrona.concurrent.IdleStrategy;
+import org.agrona.concurrent.NoOpLock;
+import org.agrona.concurrent.ShutdownSignalBarrier;
+import org.agrona.concurrent.SystemEpochClock;
+import org.agrona.concurrent.YieldingIdleStrategy;
 import org.agrona.concurrent.errors.DistinctErrorLog;
 import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.concurrent.status.CountersReader;
@@ -65,15 +87,35 @@ import java.util.function.Function;
 import java.util.function.LongConsumer;
 import java.util.function.Supplier;
 
-import static io.aeron.AeronCounters.*;
-import static io.aeron.ChannelUri.*;
-import static io.aeron.CommonContext.*;
+import static io.aeron.AeronCounters.CLUSTER_ELECTION_COUNT_TYPE_ID;
+import static io.aeron.AeronCounters.CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID;
+import static io.aeron.AeronCounters.CLUSTER_STANDBY_SNAPSHOT_COUNTER_TYPE_ID;
+import static io.aeron.AeronCounters.NODE_CONTROL_TOGGLE_TYPE_ID;
+import static io.aeron.AeronCounters.validateCounterTypeId;
+import static io.aeron.ChannelUri.addAliasIfAbsent;
+import static io.aeron.ChannelUri.parse;
+import static io.aeron.CommonContext.ENDPOINT_PARAM_NAME;
+import static io.aeron.CommonContext.INITIAL_TERM_ID_PARAM_NAME;
+import static io.aeron.CommonContext.TERM_ID_PARAM_NAME;
+import static io.aeron.CommonContext.TERM_OFFSET_PARAM_NAME;
+import static io.aeron.CommonContext.UDP_CHANNEL;
+import static io.aeron.CommonContext.driverFilePageSize;
+import static io.aeron.CommonContext.fallbackLogger;
 import static io.aeron.cluster.ConsensusModule.Configuration.CLUSTER_CLIENT_TIMEOUT_COUNT_TYPE_ID;
+import static io.aeron.cluster.ConsensusModule.Configuration.CLUSTER_CLOCK_PROP_NAME;
 import static io.aeron.cluster.ConsensusModule.Configuration.CLUSTER_NODE_ROLE_TYPE_ID;
 import static io.aeron.cluster.ConsensusModule.Configuration.COMMIT_POSITION_TYPE_ID;
-import static io.aeron.cluster.ConsensusModule.Configuration.*;
+import static io.aeron.cluster.ConsensusModule.Configuration.CONSENSUS_MODULE_ERROR_COUNT_TYPE_ID;
+import static io.aeron.cluster.ConsensusModule.Configuration.CONSENSUS_MODULE_STATE_TYPE_ID;
+import static io.aeron.cluster.ConsensusModule.Configuration.CONTROL_TOGGLE_TYPE_ID;
+import static io.aeron.cluster.ConsensusModule.Configuration.ELECTION_STATE_TYPE_ID;
+import static io.aeron.cluster.ConsensusModule.Configuration.SERVICE_ID;
+import static io.aeron.cluster.ConsensusModule.Configuration.SNAPSHOT_COUNTER_TYPE_ID;
+import static java.lang.Boolean.parseBoolean;
 import static org.agrona.BitUtil.findNextPositivePowerOfTwo;
-import static org.agrona.SystemUtil.*;
+import static org.agrona.SystemUtil.getDurationInNanos;
+import static org.agrona.SystemUtil.getSizeAsInt;
+import static org.agrona.SystemUtil.loadPropertiesFiles;
 
 /**
  * Component which resides on each node and is responsible for coordinating consensus within a cluster in concert
@@ -216,13 +258,15 @@ public final class ConsensusModule implements AutoCloseable
      *
      * @param args command line argument which is a list for properties files as URLs or filenames.
      */
+    @SuppressWarnings("try")
     public static void main(final String[] args)
     {
         loadPropertiesFiles(args);
 
-        try (ConsensusModule consensusModule = launch())
+        try (ShutdownSignalBarrier barrier = new ShutdownSignalBarrier();
+            ConsensusModule ignored = launch(new Context().terminationHook(barrier::signalAll)))
         {
-            consensusModule.context().shutdownSignalBarrier().await();
+            barrier.await();
             System.out.println("Shutdown ConsensusModule...");
         }
     }
@@ -784,8 +828,8 @@ public final class ConsensusModule implements AutoCloseable
         /**
          * Default threshold value for the consensus module agent work cycle threshold to track for being exceeded.
          */
-        @Config(defaultType = DefaultType.LONG, defaultLong = 1000L * 1000 * 1000)
-        public static final long CYCLE_THRESHOLD_DEFAULT_NS = TimeUnit.MILLISECONDS.toNanos(1000);
+        @Config(defaultType = DefaultType.LONG, defaultLong = 1_000_000L)
+        public static final long CYCLE_THRESHOLD_DEFAULT_NS = TimeUnit.MILLISECONDS.toNanos(1);
 
         /**
          * Property name for threshold value, which is used for tracking total snapshot duration breaches.
@@ -931,6 +975,22 @@ public final class ConsensusModule implements AutoCloseable
          */
         public static final String CONSENSUS_MODULE_EXTENSION_CLASS_NAME_PROP_NAME =
             "aeron.cluster.consensus.module.extension";
+
+        /**
+         * Property name of the setting to control whether the consensus module should bind the control endpoint of
+         * the consensus publication to its local consensus address.
+         */
+        @Config(defaultType = DefaultType.BOOLEAN, defaultBoolean = true)
+        public static final String CONSENSUS_MODULE_ENABLE_CONTROL_ON_CONSENSUS_CHANNEL_PROP_NAME =
+            "aeron.cluster.consensus.control.enable";
+
+        /**
+         * Property name of the setting to control whether the consensus module should bind the control endpoint of
+         * the consensus publication to its local log address.
+         */
+        @Config(defaultType = DefaultType.BOOLEAN, defaultBoolean = true)
+        public static final String CONSENSUS_MODULE_ENABLE_CONTROL_ON_LOG_CHANNEL_PROP_NAME =
+            "aeron.cluster.log.control.enable";
 
         /**
          * The value {@link #CLUSTER_INGRESS_FRAGMENT_LIMIT_DEFAULT} or system property
@@ -1238,6 +1298,15 @@ public final class ConsensusModule implements AutoCloseable
             {
                 return DEFAULT_AUTHORISATION_SERVICE_SUPPLIER;
             }
+            else if (AuthorisationService.DENY_ALL_NAME.equals(supplierClassName))
+            {
+                return () -> AuthorisationService.DENY_ALL;
+            }
+            else if (AuthorisationService.ALLOW_ALL_NAME.equals(supplierClassName))
+            {
+                fallbackLogger().println("Warning: Cluster authorisation service set to allow all requests");
+                return () -> AuthorisationService.ALLOW_ALL;
+            }
 
             try
             {
@@ -1429,6 +1498,29 @@ public final class ConsensusModule implements AutoCloseable
 
             return null;
         }
+
+        /**
+         * Determine the ConsensusModule should bind the control endpoint of the consensus publication.
+         *
+         * @return <code>true</code> if the ConsensusModule should bind the control endpoint of the consensus
+         * publication.
+         */
+        public static boolean enableControlOnConsensusChannel()
+        {
+            return parseBoolean(System.getProperty(
+                CONSENSUS_MODULE_ENABLE_CONTROL_ON_CONSENSUS_CHANNEL_PROP_NAME, "true"));
+        }
+
+        /**
+         * Determine the ConsensusModule should bind the control endpoint of the log publication.
+         *
+         * @return <code>true</code> if the ConsensusModule should bind the log endpoint of the consensus
+         * publication.
+         */
+        public static boolean enableControlOnLogChannel()
+        {
+            return parseBoolean(System.getProperty(CONSENSUS_MODULE_ENABLE_CONTROL_ON_LOG_CHANNEL_PROP_NAME, "true"));
+        }
     }
 
     /**
@@ -1440,6 +1532,7 @@ public final class ConsensusModule implements AutoCloseable
     public static final class Context implements Cloneable
     {
         private static final VarHandle IS_CONCLUDED_VH;
+
         static
         {
             try
@@ -1534,7 +1627,6 @@ public final class ConsensusModule implements AutoCloseable
         private Counter standbySnapshotCounter;
         private Counter electionCounter;
         private Counter leadershipTermId;
-        private ShutdownSignalBarrier shutdownSignalBarrier;
         private Runnable terminationHook;
 
         private AeronArchive.Context archiveContext;
@@ -1547,8 +1639,10 @@ public final class ConsensusModule implements AutoCloseable
         private AppVersionValidator appVersionValidator;
         private boolean isLogMdc;
         private boolean useAgentInvoker = false;
-        private ConsensusModuleStateExport boostrapState = null;
+        private ConsensusModuleStateExport bootstrapState = null;
         private boolean acceptStandbySnapshots = Configuration.acceptStandbySnapshots();
+        private boolean enableControlOnConsensusChannel = Configuration.enableControlOnConsensusChannel();
+        private boolean enableControlOnLogChannel = Configuration.enableControlOnLogChannel();
 
         /**
          * Perform a shallow copy of the object.
@@ -1626,7 +1720,8 @@ public final class ConsensusModule implements AutoCloseable
 
             if (startupCanvassTimeoutNs / leaderHeartbeatTimeoutNs < 2)
             {
-                throw new ClusterException("startupCanvassTimeoutNs=" + startupCanvassTimeoutNs +
+                throw new ClusterException(
+                    "startupCanvassTimeoutNs=" + startupCanvassTimeoutNs +
                     " must be a multiple of leaderHeartbeatTimeoutNs=" + leaderHeartbeatTimeoutNs);
             }
 
@@ -1661,12 +1756,15 @@ public final class ConsensusModule implements AutoCloseable
 
             if (null == markFile)
             {
+                final int filePageSize = null != aeron ? aeron.context().filePageSize() :
+                    driverFilePageSize(new File(aeronDirectoryName), epochClock, new CommonContext().driverTimeoutMs());
                 markFile = new ClusterMarkFile(
                     new File(markFileDir, ClusterMarkFile.FILENAME),
                     ClusterComponentType.CONSENSUS_MODULE,
                     errorBufferLength,
                     epochClock,
-                    ClusteredServiceContainer.Configuration.LIVENESS_TIMEOUT_MS);
+                    ClusteredServiceContainer.Configuration.LIVENESS_TIMEOUT_MS,
+                    filePageSize);
             }
 
             MarkFile.ensureMarkFileLink(
@@ -1719,9 +1817,9 @@ public final class ConsensusModule implements AutoCloseable
                     new Aeron.Context()
                         .aeronDirectoryName(aeronDirectoryName)
                         .errorHandler(errorHandler)
+                        .subscriberErrorHandler(RethrowingErrorHandler.INSTANCE)
                         .epochClock(epochClock)
                         .useConductorAgentInvoker(true)
-                        .subscriberErrorHandler(RethrowingErrorHandler.INSTANCE)
                         .awaitingIdleStrategy(YieldingIdleStrategy.INSTANCE)
                         .clientLock(NoOpLock.INSTANCE)
                         .clientName(agentRoleName));
@@ -1757,7 +1855,7 @@ public final class ConsensusModule implements AutoCloseable
                 throw new ClusterException("Aeron client must use a RethrowingErrorHandler");
             }
 
-            if (null == aeron.conductorAgentInvoker())
+            if (!aeron.context().useConductorAgentInvoker())
             {
                 throw new ClusterException("Aeron client must use conductor agent invoker");
             }
@@ -1945,18 +2043,16 @@ public final class ConsensusModule implements AutoCloseable
                 .ownsAeronClient(false)
                 .lock(NoOpLock.INSTANCE)
                 .controlRequestChannel(addAliasIfAbsent(
-                archiveContext.controlRequestChannel(), "cm-archive-ctrl-req-cluster-" + clusterId))
+                archiveContext.controlRequestChannel(),
+                "cm-archive-ctrl-req-cluster-" + clusterId + "-member-" + clusterMemberId))
                 .controlResponseChannel(addAliasIfAbsent(
-                archiveContext.controlResponseChannel(), "cm-archive-ctrl-resp-cluster-" + clusterId));
-
-            if (null == shutdownSignalBarrier)
-            {
-                shutdownSignalBarrier = new ShutdownSignalBarrier();
-            }
+                archiveContext.controlResponseChannel(),
+                "cm-archive-ctrl-resp-cluster-" + clusterId + "-member-" + clusterMemberId))
+                .clientName(agentRoleName);
 
             if (null == terminationHook)
             {
-                terminationHook = () -> shutdownSignalBarrier.signalAll();
+                terminationHook = () -> {};
             }
 
             if (null == authenticatorSupplier)
@@ -1981,7 +2077,7 @@ public final class ConsensusModule implements AutoCloseable
 
             if (null == egressPublisher)
             {
-                egressPublisher = new EgressPublisher();
+                egressPublisher = new EgressPublisher(leaderHeartbeatTimeoutNs);
             }
 
             final ChannelUri channelUri = parse(logChannel());
@@ -1994,7 +2090,7 @@ public final class ConsensusModule implements AutoCloseable
 
             if (null != consensusModuleExtension && 0 != serviceCount)
             {
-                throw new ClusterException("Service count must be zero when ConsensusModuleExtension installed");
+                throw new ClusterException("Service count must be zero when a ConsensusModuleExtension installed");
             }
 
             concludeMarkFile();
@@ -2229,7 +2325,7 @@ public final class ConsensusModule implements AutoCloseable
          * @see Configuration#FILE_SYNC_LEVEL_PROP_NAME
          */
         @Config
-        int fileSyncLevel()
+        public int fileSyncLevel()
         {
             return fileSyncLevel;
         }
@@ -3889,28 +3985,6 @@ public final class ConsensusModule implements AutoCloseable
         }
 
         /**
-         * Set the {@link ShutdownSignalBarrier} that can be used to shut down a consensus module.
-         *
-         * @param barrier that can be used to shut down a consensus module.
-         * @return this for a fluent API.
-         */
-        public Context shutdownSignalBarrier(final ShutdownSignalBarrier barrier)
-        {
-            shutdownSignalBarrier = barrier;
-            return this;
-        }
-
-        /**
-         * Get the {@link ShutdownSignalBarrier} that can be used to shut down a consensus module.
-         *
-         * @return the {@link ShutdownSignalBarrier} that can be used to shut down a consensus module.
-         */
-        public ShutdownSignalBarrier shutdownSignalBarrier()
-        {
-            return shutdownSignalBarrier;
-        }
-
-        /**
          * Set the {@link Runnable} that is called when the {@link ConsensusModule} processes a termination action.
          *
          * @param terminationHook that can be used to terminate a consensus module.
@@ -3924,8 +3998,6 @@ public final class ConsensusModule implements AutoCloseable
 
         /**
          * Get the {@link Runnable} that is called when the {@link ConsensusModule} processes a termination action.
-         * <p>
-         * The default action is to call signal on the {@link #shutdownSignalBarrier()}.
          *
          * @return the {@link Runnable} that can be used to terminate a consensus module.
          */
@@ -4210,6 +4282,52 @@ public final class ConsensusModule implements AutoCloseable
         }
 
         /**
+         * If the ConsensusModule should set the control endpoint for the Consensus publication.
+         *
+         * @return <code>true</code> if the control endpoint should be set, <code>false</code> otherwise.
+         */
+        public boolean enableControlOnConsensusChannel()
+        {
+            return enableControlOnConsensusChannel;
+        }
+
+        /**
+         * If the ConsensusModule should bind the control endpoint for the Consensus publication.
+         *
+         * @param enableControlOnConsensusChannel <code>true</code> if the control endpoint should be set,
+         *                                        <code>false</code> otherwise.
+         * @return this for fluent API.
+         */
+        public Context enableControlOnConsensusChannel(final boolean enableControlOnConsensusChannel)
+        {
+            this.enableControlOnConsensusChannel = enableControlOnConsensusChannel;
+            return this;
+        }
+
+        /**
+         * If the ConsensusModule should set the control endpoint for the Consensus publication.
+         *
+         * @return <code>true</code> if the control endpoint should be bound, <code>false</code> otherwise.
+         */
+        public boolean enableControlOnLogControl()
+        {
+            return enableControlOnLogChannel;
+        }
+
+        /**
+         * If the LogModule should set the control endpoint for the Log publication.
+         *
+         * @param setControlOnLogChannel <code>true</code> if the control endpoint should be set, <code>false</code>
+         *                               otherwise.
+         * @return this for fluent API.
+         */
+        public Context enableControlOnLogControl(final boolean setControlOnLogChannel)
+        {
+            this.enableControlOnLogChannel = setControlOnLogChannel;
+            return this;
+        }
+
+        /**
          * Delete the cluster directory.
          */
         public void deleteDirectory()
@@ -4230,9 +4348,9 @@ public final class ConsensusModule implements AutoCloseable
             CloseHelper.close(countedErrorHandler, recordingLog);
             CloseHelper.close(countedErrorHandler, nodeStateFile);
             CloseHelper.close(countedErrorHandler, markFile);
-            if (errorHandler instanceof AutoCloseable)
+            if (errorHandler instanceof AutoCloseable handler)
             {
-                CloseHelper.quietClose((AutoCloseable)errorHandler); // Ignore error to ensure the rest will be closed
+                CloseHelper.quietClose(handler); // Ignore error to ensure the rest will be closed
             }
 
             if (ownsAeronClient)
@@ -4287,13 +4405,13 @@ public final class ConsensusModule implements AutoCloseable
          */
         ConsensusModule.Context bootstrapState(final ConsensusModuleStateExport bootstrapState)
         {
-            this.boostrapState = bootstrapState;
+            this.bootstrapState = bootstrapState;
             return this;
         }
 
-        ConsensusModuleStateExport boostrapState()
+        ConsensusModuleStateExport bootstrapState()
         {
-            return boostrapState;
+            return bootstrapState;
         }
 
         private void concludeMarkFile()
@@ -4432,7 +4550,6 @@ public final class ConsensusModule implements AutoCloseable
                 "\n    standbySnapshotCounter=" + standbySnapshotCounter +
                 "\n    electionCounter=" + electionCounter +
                 "\n    leadershipTermId=" + leadershipTermId +
-                "\n    shutdownSignalBarrier=" + shutdownSignalBarrier +
                 "\n    terminationHook=" + terminationHook +
                 "\n    archiveContext=" + archiveContext +
                 "\n    authenticatorSupplier=" + authenticatorSupplier +
@@ -4446,7 +4563,7 @@ public final class ConsensusModule implements AutoCloseable
                 "\n    totalSnapshotDurationThresholdNs=" + totalSnapshotDurationThresholdNs +
                 "\n    totalSnapshotDurationTracker=" + totalSnapshotDurationTracker +
                 "\n    acceptStandbySnapshots=" + acceptStandbySnapshots +
-                "\n    boostrapState=" + boostrapState +
+                "\n    bootstrapState=" + bootstrapState +
                 "\n}";
         }
     }

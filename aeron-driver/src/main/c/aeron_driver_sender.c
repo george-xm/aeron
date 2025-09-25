@@ -142,13 +142,13 @@ int aeron_driver_sender_do_work(void *clientd)
         sender->sender_proxy.command_queue, aeron_driver_sender_on_rb_command_queue, sender, AERON_COMMAND_DRAIN_LIMIT);
 
     int64_t bytes_received = 0;
-    int64_t short_sends_before = aeron_counter_get(sender->short_sends_counter);
+    int64_t short_sends_before = aeron_counter_get_plain(sender->short_sends_counter);
     int bytes_sent = aeron_driver_sender_do_send(sender, now_ns);
 
     if (0 == bytes_sent ||
         ++sender->duty_cycle_counter >= sender->duty_cycle_ratio ||
         now_ns > sender->control_poll_timeout_ns ||
-        short_sends_before < aeron_counter_get(sender->short_sends_counter))
+        short_sends_before < aeron_counter_get_plain(sender->short_sends_counter))
     {
         struct mmsghdr mmsghdr[1];
         mmsghdr[0].msg_hdr.msg_name = &sender->recv_buffers.addrs[0];
@@ -391,7 +391,7 @@ void aeron_driver_sender_on_resolution_change(void *clientd, void *command)
         aeron_driver_sender_log_error(sender);
     }
 
-    aeron_counter_add_ordered(sender->resolution_changes_counter, 1);
+    aeron_counter_get_and_add_release(sender->resolution_changes_counter, 1);
 }
 
 int aeron_driver_sender_do_send(aeron_driver_sender_t *sender, int64_t now_ns)
@@ -434,7 +434,7 @@ int aeron_driver_sender_do_send(aeron_driver_sender_t *sender, int64_t now_ns)
         }
     }
 
-    aeron_counter_add_ordered(sender->total_bytes_sent_counter, bytes_sent);
+    aeron_counter_get_and_add_release(sender->total_bytes_sent_counter, bytes_sent);
 
     return bytes_sent;
 }

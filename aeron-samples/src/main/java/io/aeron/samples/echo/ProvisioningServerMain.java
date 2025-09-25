@@ -26,7 +26,13 @@ import org.agrona.concurrent.AgentRunner;
 import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.ShutdownSignalBarrier;
 
-import javax.management.*;
+import javax.management.InstanceAlreadyExistsException;
+import javax.management.InstanceNotFoundException;
+import javax.management.MBeanRegistrationException;
+import javax.management.MalformedObjectNameException;
+import javax.management.NotCompliantMBeanException;
+import javax.management.ObjectName;
+import javax.management.StandardMBean;
 import java.lang.management.ManagementFactory;
 
 import static java.util.Objects.requireNonNull;
@@ -58,9 +64,8 @@ public final class ProvisioningServerMain implements Agent, AutoCloseable
     @SuppressWarnings("try")
     public static void main(final String[] args)
     {
-        final ShutdownSignalBarrier barrier = new ShutdownSignalBarrier();
-
-        try (ProvisioningServerMain ignore = ProvisioningServerMain.launch(new Aeron.Context()))
+        try (ShutdownSignalBarrier barrier = new ShutdownSignalBarrier();
+            ProvisioningServerMain ignore = ProvisioningServerMain.launch(new Aeron.Context()))
         {
             barrier.await();
             System.out.println("Shutdown Provisioning Server...");

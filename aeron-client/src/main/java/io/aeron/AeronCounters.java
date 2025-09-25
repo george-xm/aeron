@@ -25,11 +25,20 @@ import org.agrona.concurrent.status.CountersReader;
 import java.util.Objects;
 
 import static org.agrona.BitUtil.SIZE_OF_INT;
+import static org.agrona.concurrent.status.CountersReader.LABEL_OFFSET;
+import static org.agrona.concurrent.status.CountersReader.MAX_LABEL_LENGTH;
+import static org.agrona.concurrent.status.CountersReader.METADATA_LENGTH;
+import static org.agrona.concurrent.status.CountersReader.RECORD_ALLOCATED;
+import static org.agrona.concurrent.status.CountersReader.REFERENCE_ID_OFFSET;
+import static org.agrona.concurrent.status.CountersReader.counterOffset;
+import static org.agrona.concurrent.status.CountersReader.metaDataOffset;
 
 /**
  * This class serves as a registry for all counter type IDs used by Aeron.
  * <p>
- * The following ranges are reserved:
+ * Type IDs less than 1000 are reserved for Aeron use. Any custom counters should use a typeId of 1000 or higher.
+ * <p>
+ * Aeron uses the following specific ranges:
  * <ul>
  *     <li>{@code 0 - 99}: for client/driver counters.</li>
  *     <li>{@code 100 - 199}: for archive counters.</li>
@@ -38,6 +47,276 @@ import static org.agrona.BitUtil.SIZE_OF_INT;
  */
 public final class AeronCounters
 {
+    // System counter IDs to be accessed outside the driver.
+    /**
+     * Counter id for bytes sent over the network.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_BYTES_SENT = 0;
+
+    /**
+     * Counter id for bytes sent over the network.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_BYTES_RECEIVED = 1;
+
+    /**
+     * Counter id for failed offers to the receiver proxy.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_RECEIVER_PROXY_FAILS = 2;
+
+    /**
+     * Counter id for failed offers to the sender proxy.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_SENDER_PROXY_FAILS = 3;
+
+    /**
+     * Counter id for failed offers to the conductor proxy.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_CONDUCTOR_PROXY_FAILS = 4;
+
+    /**
+     * Counter id for NAKs sent back to senders requesting re-transmits.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_NAK_MESSAGES_SENT = 5;
+
+    /**
+     * Counter id for NAKs received from receivers requesting re-transmits.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_NAK_MESSAGES_RECEIVED = 6;
+
+    /**
+     * Counter id for status messages sent back to senders for flow control.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_STATUS_MESSAGES_SENT = 7;
+
+    /**
+     * Counter id for status messages received from receivers for flow control.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_STATUS_MESSAGES_RECEIVED = 8;
+
+    /**
+     * Counter id for heartbeat data frames sent to indicate liveness in the absence of data to send.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_HEARTBEATS_SENT = 9;
+
+    /**
+     * Counter id for heartbeat data frames received to indicate liveness in the absence of data to send.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_HEARTBEATS_RECEIVED = 10;
+
+    /**
+     * Counter id for data packets re-transmitted as a result of NAKs.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_RETRANSMITS_SENT = 11;
+
+    /**
+     * Counter id for packets received which under-run the current flow control window for images.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_FLOW_CONTROL_UNDER_RUNS = 12;
+
+    /**
+     * Counter id for packets received which over-run the current flow control window for images.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_FLOW_CONTROL_OVER_RUNS = 13;
+
+    /**
+     * Counter id for invalid packets received.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_INVALID_PACKETS = 14;
+
+    /**
+     * Counter id for errors observed by the driver and an indication to read the distinct error log.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_ERRORS = 15;
+
+    /**
+     * Counter id for socket send operation which resulted in less than the packet length being sent.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_SHORT_SENDS = 16;
+
+    /**
+     * Counter id for attempts to free log buffers no longer required by the driver which as still held by clients.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_FREE_FAILS = 17;
+
+    /**
+     * Counter id for the times a sender has entered the state of being back-pressured when it could have sent faster.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_SENDER_FLOW_CONTROL_LIMITS = 18;
+
+    /**
+     * Counter id for the times a publication has been unblocked after a client failed to complete an offer within a
+     * timeout.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_UNBLOCKED_PUBLICATIONS = 19;
+
+    /**
+     * Counter id for the times a command has been unblocked after a client failed to complete an offer within a
+     * timeout.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_UNBLOCKED_COMMANDS = 20;
+
+    /**
+     * Counter id for the times the channel endpoint detected a possible TTL asymmetry between its config and new
+     * connection.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_POSSIBLE_TTL_ASYMMETRY = 21;
+
+    /**
+     * Counter id for status of the {@link org.agrona.concurrent.ControllableIdleStrategy} if configured.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_CONTROLLABLE_IDLE_STRATEGY = 22;
+
+    /**
+     * Counter id for the times a loss gap has been filled when NAKs have been disabled.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_LOSS_GAP_FILLS = 23;
+
+    /**
+     * Counter id for the Aeron clients that have timed out without a graceful close.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_CLIENT_TIMEOUTS = 24;
+
+    /**
+     * Counter id for the times a connection endpoint has been re-resolved resulting in a change.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_RESOLUTION_CHANGES = 25;
+
+    /**
+     * Counter id for the maximum time spent by the conductor between work cycles.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_CONDUCTOR_MAX_CYCLE_TIME = 26;
+
+    /**
+     * Counter id for the number of times the cycle time threshold has been exceeded by the conductor in its work cycle.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_CONDUCTOR_CYCLE_TIME_THRESHOLD_EXCEEDED = 27;
+
+    /**
+     * Counter id for the maximum time spent by the sender between work cycles.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_SENDER_MAX_CYCLE_TIME = 28;
+
+    /**
+     * Counter id for the number of times the cycle time threshold has been exceeded by the sender in its work cycle.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_SENDER_CYCLE_TIME_THRESHOLD_EXCEEDED = 29;
+
+    /**
+     * Counter id for the maximum time spent by the receiver between work cycles.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_RECEIVER_MAX_CYCLE_TIME = 30;
+
+    /**
+     * Counter id for the number of times the cycle time threshold has been exceeded by the receiver in its work cycle.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_RECEIVER_CYCLE_TIME_THRESHOLD_EXCEEDED = 31;
+
+    /**
+     * Counter id for the maximum time spent by the NameResolver in one of its operations.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_NAME_RESOLVER_MAX_TIME = 32;
+
+    /**
+     * Counter id for the number of times the time threshold has been exceeded by the NameResolver.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_NAME_RESOLVER_TIME_THRESHOLD_EXCEEDED = 33;
+
+    /**
+     * Counter id for the version of the media driver.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_AERON_VERSION = 34;
+
+    /**
+     * Counter id for the total number of bytes currently mapped in log buffers, CnC file, and loss report.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_BYTES_CURRENTLY_MAPPED = 35;
+
+    /**
+     * Counter id for the minimum bound on the number of bytes re-transmitted as a result of NAKs.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_RETRANSMITTED_BYTES = 36;
+
+    /**
+     * Counter id for the number of times that the retransmit pool has been overflowed.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_RETRANSMIT_OVERFLOW = 37;
+
+    /**
+     * Counter id for the number of error frames received by this driver.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_ERROR_FRAMES_RECEIVED = 38;
+
+    /**
+     * Counter id for the number of error frames sent by this driver.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_ERROR_FRAMES_SENT = 39;
+
+    /**
+     * Counter id for the number of publications that have been revoked.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_PUBLICATIONS_REVOKED = 40;
+
+    /**
+     * Counter id for the number of publication images that have been revoked.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_PUBLICATION_IMAGES_REVOKED = 41;
+
+    /**
+     * Counter id for the number of images that have been rejected.
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_IMAGES_REJECTED = 42;
+
+    /**
+     * Counter id for the control protocol between clients and media driver.
+     *
+     * @since 1.49.0
+     */
+    @AeronCounter
+    public static final int SYSTEM_COUNTER_ID_CONTROL_PROTOCOL_VERSION = 43;
+
     // Client/driver counters
     /**
      * System-wide counters for monitoring. These are separate from counters used for position tracking on streams.
@@ -156,6 +435,18 @@ public final class AeronCounters
     @AeronCounter(expectedCName = "CHANNEL_NUM_DESTINATIONS")
     public static final int MDC_DESTINATIONS_COUNTER_TYPE_ID = 18;
 
+    /**
+     * The number of NAK messages received by the Sender.
+     */
+    @AeronCounter
+    public static final int DRIVER_SENDER_NAKS_RECEIVED_TYPE_ID = 19;
+
+    /**
+     * The number of NAK messages sent by the Receiver.
+     */
+    @AeronCounter
+    public static final int DRIVER_RECEIVER_NAKS_SENT_TYPE_ID = 20;
+
     // Archive counters
     /**
      * The position a recording has reached when being archived.
@@ -242,6 +533,12 @@ public final class AeronCounters
     @AeronCounter
     public static final int ARCHIVE_REPLAY_SESSION_COUNT_TYPE_ID = 112;
 
+    /**
+     * The type id of the {@link Counter} used for tracking Archive clients.
+     */
+    @AeronCounter
+    public static final int ARCHIVE_CONTROL_SESSION_TYPE_ID = 113;
+
     // Cluster counters
 
     /**
@@ -281,12 +578,6 @@ public final class AeronCounters
     public static final int CLUSTER_SNAPSHOT_COUNTER_TYPE_ID = 205;
 
     /**
-     * Counter type for count of standby snapshots received.
-     */
-    @AeronCounter(existsInC = false)
-    public static final int CLUSTER_STANDBY_SNAPSHOT_COUNTER_TYPE_ID = 232;
-
-    /**
      * Type id for election state counter.
      */
     @AeronCounter
@@ -315,12 +606,6 @@ public final class AeronCounters
      */
     @AeronCounter
     public static final int CLUSTER_BACKUP_ERROR_COUNT_TYPE_ID = 211;
-
-    /**
-     * The type id of the {@link Counter} used for tracking the number of snapshots downloaded.
-     */
-    @AeronCounter
-    public static final int CLUSTER_BACKUP_SNAPSHOT_RETRIEVE_COUNT_TYPE_ID = 240;
 
     /**
      * Counter type id for the consensus module error count.
@@ -397,6 +682,24 @@ public final class AeronCounters
     public static final int CLUSTER_STANDBY_CONTROL_TOGGLE_TYPE_ID = 223;
 
     /**
+     * The type if of the {@link Counter} used for transition module state.
+     */
+    @AeronCounter(expectedCName = "CLUSTER_TRANSITION_MODULE_STATE")
+    public static final int TRANSITION_MODULE_STATE_TYPE_ID = 224;
+
+    /**
+     * Transition module control toggle type id.
+     */
+    @AeronCounter(expectedCName = "CLUSTER_TRANSITION_MODULE_CONTROL_TOGGLE")
+    public static final int TRANSITION_MODULE_CONTROL_TOGGLE_TYPE_ID = 225;
+
+    /**
+     * Counter type id for the transition module error count.
+     */
+    @AeronCounter(expectedCName = "CLUSTER_TRANSITION_MODULE_ERROR_COUNT")
+    public static final int TRANSITION_MODULE_ERROR_COUNT_TYPE_ID = 226;
+
+    /**
      * The type id of the {@link Counter} used for keeping track of the max duty cycle time of the cluster standby.
      */
     @AeronCounter
@@ -410,31 +713,6 @@ public final class AeronCounters
     public static final int CLUSTER_STANDBY_CYCLE_TIME_THRESHOLD_EXCEEDED_TYPE_ID = 228;
 
     /**
-     * The type id of the {@link Counter} to make visible the memberId that the cluster standby is currently using to
-     * as a source for the cluster log.
-     */
-    @AeronCounter
-    public static final int CLUSTER_STANDBY_SOURCE_MEMBER_ID_TYPE_ID = 231;
-
-    /**
-     * Counter type id for the transition module error count.
-     */
-    @AeronCounter(expectedCName = "CLUSTER_TRANSITION_MODULE_ERROR_COUNT")
-    public static final int TRANSITION_MODULE_ERROR_COUNT_TYPE_ID = 226;
-
-    /**
-     * The type if of the {@link Counter} used for transition module state.
-     */
-    @AeronCounter(expectedCName = "CLUSTER_TRANSITION_MODULE_STATE")
-    public static final int TRANSITION_MODULE_STATE_TYPE_ID = 224;
-
-    /**
-     * Transition module control toggle type id.
-     */
-    @AeronCounter(expectedCName = "CLUSTER_TRANSITION_MODULE_CONTROL_TOGGLE")
-    public static final int TRANSITION_MODULE_CONTROL_TOGGLE_TYPE_ID = 225;
-
-    /**
      * The type id of the {@link Counter} used for keeping track of the max duty cycle time of the transition module.
      */
     @AeronCounter(expectedCName = "CLUSTER_TRANSITION_MODULE_MAX_CYCLE_TIME")
@@ -446,6 +724,19 @@ public final class AeronCounters
      */
     @AeronCounter(expectedCName = "CLUSTER_TRANSITION_MODULE_CYCLE_TIME_THRESHOLD_EXCEEDED")
     public static final int TRANSITION_MODULE_CYCLE_TIME_THRESHOLD_EXCEEDED_TYPE_ID = 230;
+
+    /**
+     * The type id of the {@link Counter} to make visible the memberId that the cluster standby is currently using to
+     * as a source for the cluster log.
+     */
+    @AeronCounter
+    public static final int CLUSTER_STANDBY_SOURCE_MEMBER_ID_TYPE_ID = 231;
+
+    /**
+     * Counter type for count of standby snapshots received.
+     */
+    @AeronCounter(existsInC = false)
+    public static final int CLUSTER_STANDBY_SNAPSHOT_COUNTER_TYPE_ID = 232;
 
     /**
      * The type of the {@link Counter} used for handling node specific operations.
@@ -491,6 +782,172 @@ public final class AeronCounters
      */
     @AeronCounter(existsInC = false)
     public static final int CLUSTER_LEADERSHIP_TERM_ID_TYPE_ID = 239;
+
+    /**
+     * The type id of the {@link Counter} used for tracking the number of snapshots downloaded.
+     */
+    @AeronCounter
+    public static final int CLUSTER_BACKUP_SNAPSHOT_RETRIEVE_COUNT_TYPE_ID = 240;
+
+    /**
+     * The type id of the {@link Counter} used for tracking Cluster clients.
+     */
+    @AeronCounter
+    public static final int CLUSTER_SESSION_TYPE_ID = 241;
+
+    // ===================
+    // Sequencer Counters.
+    // ===================
+
+    /**
+     * Counter id for Sequencer Index.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_INDEX_COUNTER_TYPE_ID = 500;
+
+    /**
+     * Counter id for application group last message.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_GROUP_HWM_COUNTER_TYPE_ID = 501;
+
+    /**
+     * Counter id for session last message.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_SESSION_GREATEST_MESSAGE_ID_COUNTER_TYPE_ID = 502;
+
+    /**
+     * Counter id for session messages.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_SESSION_MESSAGES_COUNTER_TYPE_ID = 503;
+
+    /**
+     * Counter id for session last message timestamp.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_SESSION_GREATEST_MESSAGE_TIMESTAMP_COUNTER_TYPE_ID = 504;
+
+    /**
+     * Counter id for the next snapshot id.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_CLIENT_SNAPSHOT_ID_COUNTER_TYPE_ID = 505;
+
+    /**
+     * Counter id for sequence index.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_APPLICATION_SEQUENCE_INDEX_COUNTER_TYPE_ID = 507;
+
+    /**
+     * Application state counter type id.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_APPLICATION_STATE_COUNTER_TYPE_ID = 508;
+
+    /**
+     * Counter id for error count.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_APPLICATION_ERROR_COUNT_TYPE_ID = 509;
+
+    /**
+     * Counter id for max service time.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_APPLICATION_MAX_SERVICE_TIME_TYPE_ID = 510;
+
+    /**
+     * Counter id for the number of times the service time threshold was exceeded.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_APPLICATION_SERVICE_TIME_THRESHOLD_EXCEEDED_COUNT_TYPE_ID = 511;
+
+    /**
+     * Counter id for the total service time during the last interval.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_APPLICATION_INTERVAL_SERVICE_TIME_TYPE_ID = 512;
+
+    /**
+     * Counter id for the maximum individual service time during the last interval.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_APPLICATION_INTERVAL_MAX_SERVICE_TIME_TYPE_ID = 513;
+
+    /**
+     * Counter id for the total number of invocations during the last interval.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_APPLICATION_INTERVAL_TOTAL_INVOCATIONS_TYPE_ID = 514;
+
+    /**
+     * Counter id for the load time, in milliseconds, of a snapshot.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_APPLICATION_SNAPSHOT_LOAD_TIME_TYPE_ID = 515;
+
+    /**
+     * Counter id for the store time, in milliseconds, of a snapshot.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_APPLICATION_SNAPSHOT_STORE_TIME_TYPE_ID = 516;
+
+    /**
+     * Counter id for the number of 'take snapshot' failures.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_APPLICATION_TAKE_SNAPSHOT_FAILURES_TYPE_ID = 517;
+
+    /**
+     * Counter id for the number of 'take snapshot' instances.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_APPLICATION_TAKE_SNAPSHOT_COUNT_TYPE_ID = 518;
+
+    /**
+     * Counter id for the application service's session with the sequencer.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_APPLICATION_SESSION_ID_TYPE_ID = 519;
+
+    /**
+     * Counter id for the replay index's minimum sequence index.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_REPLAY_INDEX_MIN_SEQUENCE_INDEX_COUNTER_TYPE_ID = 520;
+
+    /**
+     * Counter id for the replay index's minimum log position.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_REPLAY_INDEX_MIN_SEQUENCE_LOG_POSITION_COUNTER_TYPE_ID = 521;
+
+    /**
+     * Counter id for the replay index's maximum sequence index.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_REPLAY_INDEX_MAX_SEQUENCE_INDEX_COUNTER_TYPE_ID = 522;
+
+    /**
+     * Counter id for the replay index's maximum log position.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_REPLAY_INDEX_MAX_SEQUENCE_LOG_POSITION_COUNTER_TYPE_ID = 523;
+
+    /**
+     * Counter id for the replay index's initial sequence index.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_REPLAY_INDEX_INITIAL_SEQUENCE_INDEX_COUNTER_TYPE_ID = 524;
+
+    /**
+     * Counter id for the replay index's initial log position.
+     */
+    @AeronCounter
+    public static final int SEQUENCER_REPLAY_INDEX_INITIAL_SEQUENCE_LOG_POSITION_COUNTER_TYPE_ID = 525;
 
     private AeronCounters()
     {
@@ -571,37 +1028,27 @@ public final class AeronCounters
         final AtomicBuffer metaDataBuffer, final int counterId, final String value)
     {
         Objects.requireNonNull(metaDataBuffer);
-        if (counterId < 0)
-        {
-            throw new IllegalArgumentException("counter id " + counterId + " is negative");
-        }
+        validateCounterId(metaDataBuffer, counterId);
 
-        final int maxCounterId = (metaDataBuffer.capacity() / CountersReader.METADATA_LENGTH) - 1;
-        if (counterId > maxCounterId)
-        {
-            throw new IllegalArgumentException(
-                "counter id " + counterId + " out of range: 0 - maxCounterId=" + maxCounterId);
-        }
-
-        final int counterMetaDataOffset = CountersReader.metaDataOffset(counterId);
+        final int counterMetaDataOffset = metaDataOffset(counterId);
         final int state = metaDataBuffer.getIntVolatile(counterMetaDataOffset);
-        if (CountersReader.RECORD_ALLOCATED != state)
+        if (RECORD_ALLOCATED != state)
         {
             throw new IllegalArgumentException("counter id " + counterId + " is not allocated, state: " + state);
         }
 
-        final int existingLabelLength = metaDataBuffer.getInt(counterMetaDataOffset + CountersReader.LABEL_OFFSET);
-        final int remainingLabelLength = CountersReader.MAX_LABEL_LENGTH - existingLabelLength;
+        final int existingLabelLength = metaDataBuffer.getInt(counterMetaDataOffset + LABEL_OFFSET);
+        final int remainingLabelLength = MAX_LABEL_LENGTH - existingLabelLength;
 
         final int writtenLength = metaDataBuffer.putStringWithoutLengthAscii(
-            counterMetaDataOffset + CountersReader.LABEL_OFFSET + SIZE_OF_INT + existingLabelLength,
+            counterMetaDataOffset + LABEL_OFFSET + SIZE_OF_INT + existingLabelLength,
             value,
             0,
             remainingLabelLength);
         if (writtenLength > 0)
         {
-            metaDataBuffer.putIntOrdered(
-                counterMetaDataOffset + CountersReader.LABEL_OFFSET, existingLabelLength + writtenLength);
+            metaDataBuffer.putIntRelease(
+                counterMetaDataOffset + LABEL_OFFSET, existingLabelLength + writtenLength);
         }
 
         return writtenLength;
@@ -617,5 +1064,40 @@ public final class AeronCounters
     public static String formatVersionInfo(final String fullVersion, final String commitHash)
     {
         return "version=" + fullVersion + " commit=" + commitHash;
+    }
+
+    /**
+     * Set a reference id for a given counter id.
+     *
+     * @param metaDataBuffer containing the counter metadata.
+     * @param valuesBuffer   containing the counter values.
+     * @param counterId      to be set.
+     * @param referenceId    to set for the counter.
+     * @see CountersReader#getCounterReferenceId(int)
+     * @since 1.49.0
+     */
+    public static void setReferenceId(
+        final AtomicBuffer metaDataBuffer, final AtomicBuffer valuesBuffer, final int counterId, final long referenceId)
+    {
+        Objects.requireNonNull(metaDataBuffer);
+        Objects.requireNonNull(valuesBuffer);
+        validateCounterId(metaDataBuffer, counterId);
+
+        valuesBuffer.putLongRelease(counterOffset(counterId) + REFERENCE_ID_OFFSET, referenceId);
+    }
+
+    private static void validateCounterId(final AtomicBuffer metaDataBuffer, final int counterId)
+    {
+        if (counterId < 0)
+        {
+            throw new IllegalArgumentException("counter id " + counterId + " is negative");
+        }
+
+        final int maxCounterId = (metaDataBuffer.capacity() / METADATA_LENGTH) - 1;
+        if (counterId > maxCounterId)
+        {
+            throw new IllegalArgumentException(
+                "counter id " + counterId + " out of range: 0 - maxCounterId=" + maxCounterId);
+        }
     }
 }

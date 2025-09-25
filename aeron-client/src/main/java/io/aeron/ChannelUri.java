@@ -26,6 +26,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.BiConsumer;
+import java.util.function.Function;
 
 import static io.aeron.CommonContext.*;
 import static io.aeron.logbuffer.FrameDescriptor.FRAME_ALIGNMENT;
@@ -47,6 +48,7 @@ import static java.util.Objects.requireNonNull;
  */
 public final class ChannelUri
 {
+    @SuppressWarnings("JavadocVariable")
     private enum State
     {
         MEDIA, PARAMS_KEY, PARAMS_VALUE
@@ -521,6 +523,31 @@ public final class ChannelUri
     }
 
     /**
+     * Transforms an alias of the given uri using the given function. The function will be invoked with the original
+     * alias or null if absent. The function's return value will be used as the alias in the returned uri. If the
+     * function returns null or an empty string, the alias will be removed.
+     *
+     * @param uri      the uri to transform the alias of.
+     * @param function the transformation function.
+     * @return uri equivalent to the one passed in with its alias transformed.
+     */
+    public static String transformAlias(final String uri, final Function<String, String> function)
+    {
+        final ChannelUri channelUri = ChannelUri.parse(uri);
+        final String originalAlias = channelUri.get(CommonContext.ALIAS_PARAM_NAME);
+        final String transformedAlias = function.apply(originalAlias);
+        if (Strings.isEmpty(transformedAlias))
+        {
+            channelUri.remove(CommonContext.ALIAS_PARAM_NAME);
+        }
+        else
+        {
+            channelUri.put(CommonContext.ALIAS_PARAM_NAME, transformedAlias);
+        }
+        return channelUri.toString();
+    }
+
+    /**
      * Is the param value tagged? (starts with the "tag:" prefix).
      *
      * @param paramValue to check if tagged.
@@ -624,6 +651,28 @@ public final class ChannelUri
     public boolean hasControlModeResponse()
     {
         return CONTROL_MODE_RESPONSE.equals(get(MDC_CONTROL_MODE_PARAM_NAME));
+    }
+
+    /**
+     * Take an endpoint with the format <code>host:port</code> and replace the port with a wilcard (<code>0</code>).
+     *
+     * @param endpoint to replace with a wildcard.
+     * @return  the transformed value.
+     */
+    public static String replacePortWithWildcard(final String endpoint)
+    {
+        if (null == endpoint)
+        {
+            return null;
+        }
+
+        final int i = endpoint.lastIndexOf(':');
+        if (-1 == i)
+        {
+            return null;
+        }
+
+        return endpoint.substring(0, i + 1) + "0";
     }
 
     /**

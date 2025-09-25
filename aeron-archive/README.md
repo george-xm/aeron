@@ -5,8 +5,8 @@ Aeron Archive
 
 The aeron-archive is a module which enables Aeron data stream recording and replay from durable storage. 
 
-Samples can be found [here](https://github.com/real-logic/aeron/blob/master/aeron-samples/scripts/archive/README.md) and
-systems tests [here](https://github.com/real-logic/aeron/tree/master/aeron-system-tests/src/test/java/io/aeron/archive).
+Samples can be found [here](https://github.com/aeron-io/aeron/blob/master/aeron-samples/scripts/archive/README.md) and
+systems tests [here](https://github.com/aeron-io/aeron/tree/master/aeron-system-tests/src/test/java/io/aeron/archive).
 
 Features:
 
@@ -41,7 +41,7 @@ Usage
 
 Protocol
 =====
-Messages specification use SBE [aeron-archive-codecs.xml](https://github.com/real-logic/aeron/blob/master/aeron-archive/src/main/resources/archive/aeron-archive-codecs.xml).
+Messages specification use SBE [aeron-archive-codecs.xml](https://github.com/aeron-io/aeron/blob/master/aeron-archive/src/main/resources/archive/aeron-archive-codecs.xml).
 The Archive communicates via the following interfaces:
 
  - **Recording Events stream:** other parties can subscribe to events for the start,
@@ -115,8 +115,4 @@ will also be displayed.
 
 APIs
 =====
-The C and C++ wrapper APIs are nearly complete.  They are **EXPERIMENTAL** and APIs are subject to change.
-
-Remaining work includes:
-- Exposing the `archive proxy` object directly to allow for asynchronous command execution
-- Implementation of the `recording events adaptor` and `poller`
+The synchronous C and C++ wrapper APIs are complete.  The async APIs have yet to be implemented.

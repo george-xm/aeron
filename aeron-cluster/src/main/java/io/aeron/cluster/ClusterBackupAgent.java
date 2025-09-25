@@ -186,7 +186,7 @@ public final class ClusterBackupAgent implements Agent
             backupArchive.controlResponsePoller().subscription());
 
         final long nowMs = epochClock.time();
-        nextQueryDeadlineMsCounter.setOrdered(nowMs - 1);
+        nextQueryDeadlineMsCounter.setRelease(nowMs - 1);
         timeOfLastProgressMs = nowMs;
     }
 
@@ -199,10 +199,9 @@ public final class ClusterBackupAgent implements Agent
         {
             aeron.removeUnavailableCounterHandler(unavailableCounterHandlerRegistrationId);
 
-            stopRecording();
+            CloseHelper.close(ctx.countedErrorHandler(), snapshotReplication);
             stopReplay();
-
-            CloseHelper.close(snapshotReplication);
+            stopRecording();
 
             if (!ctx.ownsAeronClient())
             {
@@ -475,16 +474,12 @@ public final class ClusterBackupAgent implements Agent
         else if (!logSourceValidator.isAcceptable(leaderMemberId, memberId))
         {
             consensusPublicationGroup.closeAndExcludeCurrent();
-            if (null != logSupplierMember && logSupplierMember.id() == memberId)
-            {
-                // we can no longer replay from the current node due to the role change
-                state(RESET_BACKUP, epochClock.time());
-            }
-            else
-            {
-                // just query another node
-                timeOfLastBackupQueryMs = 0;
-            }
+            state(RESET_BACKUP, epochClock.time());
+            return;
+        }
+        else if (null != logSupplierMember && logSupplierMember.id() != memberId)
+        {
+            state(RESET_BACKUP, epochClock.time());
             return;
         }
 
@@ -874,7 +869,7 @@ public final class ClusterBackupAgent implements Agent
                     countersReader, (int)liveLogReplaySessionId, backupArchive.archiveId());
                 if (NULL_COUNTER_ID != liveLogRecordingCounterId)
                 {
-                    liveLogPositionCounter.setOrdered(countersReader.getCounterValue(liveLogRecordingCounterId));
+                    liveLogPositionCounter.setRelease(countersReader.getCounterValue(liveLogRecordingCounterId));
                     liveLogRecordingId = RecordingPos.getRecordingId(countersReader, liveLogRecordingCounterId);
                     timeOfLastBackupQueryMs = nowMs;
                     timeOfLastProgressMs = nowMs;
@@ -972,7 +967,7 @@ public final class ClusterBackupAgent implements Agent
             recordingLog.force(2);
             if (!snapshotsRetrieved.isEmpty())
             {
-                ctx.snapshotRetrieveCounter().incrementOrdered();
+                ctx.snapshotRetrieveCounter().incrementRelease();
             }
 
             if (null != eventsListener)
@@ -985,7 +980,7 @@ public final class ClusterBackupAgent implements Agent
         snapshotsToRetrieve.clear();
 
         timeOfLastProgressMs = nowMs;
-        nextQueryDeadlineMsCounter.setOrdered(nowMs + backupQueryIntervalMs);
+        nextQueryDeadlineMsCounter.setRelease(nowMs + backupQueryIntervalMs);
         state(BACKING_UP, nowMs);
 
         return 1;
@@ -1007,7 +1002,7 @@ public final class ClusterBackupAgent implements Agent
         {
             final long liveLogPosition = aeron.countersReader().getCounterValue(liveLogRecordingCounterId);
 
-            if (liveLogPositionCounter.proposeMaxOrdered(liveLogPosition))
+            if (liveLogPositionCounter.proposeMaxRelease(liveLogPosition))
             {
                 if (null != eventsListener)
                 {
@@ -1032,7 +1027,7 @@ public final class ClusterBackupAgent implements Agent
 
         if (!stateCounter.isClosed())
         {
-            stateCounter.setOrdered(newState.code());
+            stateCounter.setRelease(newState.code());
         }
 
         state = newState;

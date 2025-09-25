@@ -70,10 +70,6 @@ public abstract class AbstractMinMulticastFlowControl
     extends AbstractMinMulticastFlowControlRhsPadding
     implements FlowControl
 {
-    /**
-     * Multiple of receiver window to allow for a retransmit action.
-     */
-    private static final int RETRANSMIT_RECEIVER_WINDOW_MULTIPLE = 16;
     private static final Receiver[] EMPTY_RECEIVERS = new Receiver[0];
 
     private final boolean isGroupTagAware;
@@ -85,6 +81,7 @@ public abstract class AbstractMinMulticastFlowControl
     private String channel;
     private AtomicCounter receiverCount;
     private ErrorHandler errorHandler;
+    private int retransmitReceiverWindowMultiple;
 
     /**
      * Base constructor for use by specialised implementations.
@@ -122,6 +119,10 @@ public abstract class AbstractMinMulticastFlowControl
         timeOfLastSetupNs = 0;
         lastSetupSenderLimit = -1;
         hasTaggedStatusMessageTriggeredSetup = false;
+        retransmitReceiverWindowMultiple = FlowControl.retransmitReceiverWindowMultiple(
+            udpChannel,
+            context.multicastFlowControlRetransmitReceiverWindowMultiple()
+        );
     }
 
     /**
@@ -186,7 +187,7 @@ public abstract class AbstractMinMulticastFlowControl
             receivers = truncateReceivers(receivers, removed);
             hasRequiredReceivers = receivers.length >= groupMinSize;
             this.receivers = receivers;
-            receiverCount.setOrdered(receivers.length);
+            receiverCount.setRelease(receivers.length);
         }
 
         return receivers.length < groupMinSize || receivers.length == 0 ? senderLimit : minLimitPosition;
@@ -212,7 +213,7 @@ public abstract class AbstractMinMulticastFlowControl
         final int mtuLength)
     {
         return FlowControl.calculateRetransmissionLength(
-            resendLength, termBufferLength, termOffset, RETRANSMIT_RECEIVER_WINDOW_MULTIPLE);
+            resendLength, termBufferLength, termOffset, retransmitReceiverWindowMultiple);
     }
 
     /**
@@ -275,7 +276,7 @@ public abstract class AbstractMinMulticastFlowControl
             this.receivers = receivers;
             minPosition = Math.min(minPosition, lastPositionPlusWindow);
             receiverAdded(receiver.receiverId, receiver.sessionId, receiver.streamId, channel, receivers.length);
-            receiverCount.setOrdered(receivers.length);
+            receiverCount.setRelease(receivers.length);
             lastSetupSenderLimit = -1;
         }
 
@@ -327,13 +328,16 @@ public abstract class AbstractMinMulticastFlowControl
         final long timeNs,
         final boolean hasMatchingTag)
     {
-        final long receiverId = error.receiverId();
-
-        for (final Receiver receiver : receivers)
+        if (hasMatchingTag)
         {
-            if (hasMatchingTag && receiverId == receiver.receiverId)
+            final long receiverId = error.receiverId();
+            for (final Receiver receiver : receivers)
             {
-                receiver.eosFlagged = true;
+                if (receiverId == receiver.receiverId)
+                {
+                    receiver.eosFlagged = true;
+                    break;
+                }
             }
         }
     }
